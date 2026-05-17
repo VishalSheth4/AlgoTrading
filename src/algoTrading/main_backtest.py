@@ -68,6 +68,7 @@ import pandas as pd
 from datetime import datetime
 from pathlib import Path
 
+from algoTrading.strategies.calendar import ForexFactoryCalendar
 from algoTrading.core.mt5_connector import connect, shutdown
 from algoTrading.dashboard import build_dashboard
 from algoTrading.data.fetch_mt5 import fetch_and_store
@@ -153,8 +154,37 @@ def purge_csv_cache() -> None:
         print(f"  ⚠️  Could not delete {len(failed)} file(s):")
         for name, err in failed:
             print(f"       — {name}: {err}")
+    
+    calendar_file = data_dir / "fx_calendar.csv"
+    if calendar_file.exists():
+        calendar_file.unlink()
+        print("       — fx_calendar.csv")
 
 
+def fetch_fx_calendar():
+
+    print("\n── Fetching FX Calendar ─────────────────────────")
+
+    try:
+
+        calendar = ForexFactoryCalendar()
+
+        df = calendar.fetch_calendar()
+
+        if df.empty:
+
+            print("  ❌ No FX calendar data fetched")
+            return
+
+        file_path = BASE / "data" / "fx_calendar.csv"
+
+        df.to_csv(file_path, index=False)
+
+        print(f"  ✅ FX calendar saved → {file_path.name}")
+
+    except Exception as e:
+
+        print(f"  ❌ Calendar fetch failed: {e}")
 # ────────────────────────────────────────────────────────────────────────────────
 # STRATEGY FACTORY
 # ────────────────────────────────────────────────────────────────────────────────
@@ -379,6 +409,8 @@ def run_combined_symbol(symbol: str, strategy_names: list) -> list:
 # ────────────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    purge_csv_cache()
+    fetch_fx_calendar()
     """
     Full pipeline: purge cache → fetch data → generate signals → backtest → report.
 

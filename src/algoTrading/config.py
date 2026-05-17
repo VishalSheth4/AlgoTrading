@@ -5,7 +5,7 @@
 class Config:
     TIMEFRAME = "M5"
     INITIAL_CAPITAL = 100
-    STRATEGY = "mark2"      
+    STRATEGY = "mark_dollar_supertrend"   #mark_dollar_supertrend
     # comma-separated for multi-strategy: STRATEGY = "mark2,mark_dollar_supertrend,engulfing""
     
     RISK_PER_TRADE = 0.05
