@@ -6,6 +6,8 @@ Install required Python packages:
 
 ```bash
 pip install pandas numpy matplotlib pandas-ta backtrader requests fastapi uvicorn
+pip install requests beautifulsoup4 pandas lxml
+pip install requests pandas
 ```
 
 Upgrade pip:

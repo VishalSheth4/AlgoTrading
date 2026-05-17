@@ -5,8 +5,10 @@
 class Config:
     TIMEFRAME = "M5"
     INITIAL_CAPITAL = 100
-    STRATEGY = "mark_dollar_supertrend"                    # comma-separated for multi-strategy: STRATEGY = "mark2,mark_dollar_supertrend,engulfing""
-    RISK_PER_TRADE = 0.01
+    STRATEGY = "mark2"      
+    # comma-separated for multi-strategy: STRATEGY = "mark2,mark_dollar_supertrend,engulfing""
+    
+    RISK_PER_TRADE = 0.05
     #SYMBOL = "XAUUSD"           # comma-separated for multi-symbol: "XAUUSD,EURUSD,GBPUSD,AUDUSD"
     SYMBOL = "XAUUSD"#EURUSD,GBPUSD,USDJPY,XAGUSD"  
     LOT_SIZE = 0.01
