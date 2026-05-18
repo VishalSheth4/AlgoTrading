@@ -3,14 +3,14 @@
 # =============================
 
 class Config:
-    TIMEFRAME = "M5"
-    INITIAL_CAPITAL = 100
-    STRATEGY = "mark_dollar_supertrend"   #mark_dollar_supertrend
+    TIMEFRAME = "M15"
+    INITIAL_CAPITAL = 200
+    STRATEGY = "SupertrendCounterFlip_X1"   #mark_dollar_supertrend , SupertrendCounterFlip_X1
     # comma-separated for multi-strategy: STRATEGY = "mark2,mark_dollar_supertrend,engulfing""
     
-    RISK_PER_TRADE = 0.05
+    RISK_PER_TRADE = 0.03
     #SYMBOL = "XAUUSD"           # comma-separated for multi-symbol: "XAUUSD,EURUSD,GBPUSD,AUDUSD"
-    SYMBOL = "XAUUSD"#EURUSD,GBPUSD,USDJPY,XAGUSD"  
+    SYMBOL = "XAUUSD"#,EURUSD,GBPUSD,USDJPY,XAGUSD"  
     LOT_SIZE = 0.01
     # STOP_LOSS = 50
     # TAKE_PROFIT = 100
@@ -53,7 +53,7 @@ class Config:
     # Maximum candle size (high - low) allowed for a signal candle.
     # Candles larger than this are skipped to avoid chasing volatile spikes.
     # Set to None to disable.
-    MAX_CANDLE_SIZE = 15
+    MAX_CANDLE_SIZE = 10
 
     # Stop taking new trades after this many losses in one calendar day.
     # Set to None to disable.
