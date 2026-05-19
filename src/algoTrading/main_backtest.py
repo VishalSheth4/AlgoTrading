@@ -88,7 +88,8 @@ from algoTrading.strategies.mark_dollar_supertrend import MarkDollarSuperTrendSt
 from algoTrading.strategies.rsi_engulfing_strategy import RSIEngulfingStrategy
 from algoTrading.strategies.mark5_supertrend import Mark5SupertrendStrategy
 from algoTrading.strategies.SupertrendCounterFlip_X1 import SupertrendCounterFlipX1Strategy
-
+from algoTrading.strategies.EmaCrossoverRetestStrategy import EmaCrossoverRetestStrategy
+from algoTrading.strategies.Ema200PullbackEngulfingStrategy import Ema200PullbackEngulfingStrategy
 # Absolute path to the package root (directory that contains main.py).
 BASE = Path(__file__).resolve().parent
 
@@ -106,6 +107,8 @@ STRATEGY_MAP = {
     "rsi_engulfing":           RSIEngulfingStrategy,
     "mark5_supertrend":        Mark5SupertrendStrategy,
     "SupertrendCounterFlip_X1": SupertrendCounterFlipX1Strategy,
+    "EmaCrossoverRetestStrategy": EmaCrossoverRetestStrategy,
+    "Ema200PullbackEngulfingStrategy": Ema200PullbackEngulfingStrategy,
 }
 
 

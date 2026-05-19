@@ -1,3 +1,6 @@
+.\venv\Scripts\Activate.ps1
+python manage.py runserver
+
 # Algo Trading Setup Guide
 
 ## Step 1: Install Environment

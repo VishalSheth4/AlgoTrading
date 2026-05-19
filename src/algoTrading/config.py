@@ -4,11 +4,11 @@
 
 class Config:
     TIMEFRAME = "M15"
-    INITIAL_CAPITAL = 200
-    STRATEGY = "SupertrendCounterFlip_X1"   #mark_dollar_supertrend , SupertrendCounterFlip_X1
+    INITIAL_CAPITAL = 100
+    STRATEGY = "mark2"#,SupertrendCounterFlip_X1"
     # comma-separated for multi-strategy: STRATEGY = "mark2,mark_dollar_supertrend,engulfing""
-    
-    RISK_PER_TRADE = 0.03
+    #Ema200PullbackEngulfingStrategy , EmaCrossoverRetestStrategy
+    RISK_PER_TRADE = 0.08
     #SYMBOL = "XAUUSD"           # comma-separated for multi-symbol: "XAUUSD,EURUSD,GBPUSD,AUDUSD"
     SYMBOL = "XAUUSD"#,EURUSD,GBPUSD,USDJPY,XAGUSD"  
     LOT_SIZE = 0.01
@@ -23,8 +23,8 @@ class Config:
 
     # Backtest date range — set both to filter bars, or None to use all data.
     # Format: "YYYY-MM-DD"
-    START_DATE = "2020-01-01"   # earliest IC Markets M5 bar
-    END_DATE   = "2026-05-14"          # up to latest available bar
+    START_DATE = "2018-07-01"   # earliest IC Markets M5 bar
+    END_DATE   = "2026-05-20"          # up to latest available bar
 
     # -------------------------------------------------------
     # Mark2 / MarkDollarSuperTrend TP Settings
