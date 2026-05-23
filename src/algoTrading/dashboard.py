@@ -6,6 +6,8 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 
+from algoTrading.config import Config
+
 
 def _get_chartjs():
     """Return Chart.js source — cached locally after first download."""
@@ -349,11 +351,11 @@ def build_dashboard():
     profits = done['profit'].tolist()
     caps    = done['capital'].tolist()
     times   = done['time'].tolist()
-    n       = len(done)
-
     wins   = done[done['profit'] > 0]
     losses = done[done['profit'] < 0]
     nw, nl = len(wins), len(losses)
+    n       = len(done)
+    outcome_n = nw + nl
 
     n_long  = int((done['type'] == 'SELL').sum())    # closed LONG trades
     n_short = int((done['type'] == 'COVER').sum())   # closed SHORT trades
@@ -363,7 +365,7 @@ def build_dashboard():
     total_profit = round(end_cap - start_cap, 2)
     profit_pct   = round(total_profit / start_cap * 100, 2) if start_cap else 0
 
-    win_rate  = round(nw / n * 100, 2)
+    overall_win_rate = round(nw / outcome_n * 100, 1) if outcome_n else 0
     avg_win   = round(wins['profit'].mean(),   2) if nw else 0
     avg_loss  = round(losses['profit'].mean(), 2) if nl else 0
 
@@ -409,7 +411,7 @@ def build_dashboard():
         first        = grp.iloc[0]
         month_start  = float(first['capital']) - float(first['profit'])
         profit_pct   = round(mp / month_start * 100, 2) if month_start else 0
-        win_rate     = round(float(mw) / mt * 100, 1) if mt else 0
+        month_win_rate = round(float(mw) / mt * 100, 1) if mt else 0
         monthly_rows.append({
             "month":      str(period),
             "trades":     mt,
@@ -417,7 +419,7 @@ def build_dashboard():
             "losses":     int(ml),
             "profit":     mp,
             "profit_pct": profit_pct,
-            "win_rate":   win_rate,
+            "win_rate":   month_win_rate,
         })
 
     # ── Weekly breakdown ──────────────────────────────────────────────
@@ -514,7 +516,7 @@ def build_dashboard():
             "nl":              nl,
             "n_long":          n_long,
             "n_short":         n_short,
-            "win_rate":        win_rate,
+            "win_rate":        overall_win_rate,
             "avg_win":         avg_win,
             "avg_loss":        avg_loss,
             "pf_display":      pf_display,
@@ -526,6 +528,7 @@ def build_dashboard():
             "cur_t":           cur_t,
             "strategies_str":  strategies_str,
             "symbols_str":     symbols_str,
+            "timeframe":       getattr(Config, "TIMEFRAME", ""),
             "biggest_win":     biggest_win,
             "biggest_loss":    biggest_loss,
         },
@@ -789,6 +792,7 @@ tbody td.muted{{color:#3d4451;font-size:11px;font-family:'Segoe UI',system-ui,sa
   <div class="tb-sep"></div>
   <span class="tb-pill active">{m['strategies_str'] or 'Strategy'}</span>
   <span class="tb-pill">{m['symbols_str'] or 'Symbol'}</span>
+  <span class="tb-pill">{m['timeframe'] or 'Timeframe'}</span>
   <span class="tb-pill">{m['n']} trades</span>
   <span class="tb-pill">{date_from[:10]} → {date_to[:10]}</span>
   <div class="tb-right">
@@ -811,7 +815,7 @@ tbody td.muted{{color:#3d4451;font-size:11px;font-family:'Segoe UI',system-ui,sa
 <!-- ── Metric Cards ── -->
 <div class="section-block">
 <div class="section-toggle" onclick="toggleSection(this)">
-  <div><span class="section-block-lbl">Overall Performance</span>&nbsp;&nbsp;<span class="section-block-meta">All symbols &nbsp;·&nbsp; {m['n']} trades &nbsp;·&nbsp; {date_from[:10]} → {date_to[:10]}</span></div>
+  <div><span class="section-block-lbl">Overall Performance</span>&nbsp;&nbsp;<span class="section-block-meta">All symbols &nbsp;·&nbsp; {m['timeframe'] or 'Timeframe'} &nbsp;·&nbsp; {m['n']} trades &nbsp;·&nbsp; {date_from[:10]} → {date_to[:10]}</span></div>
   <span class="toggle-icon">▼</span>
 </div>
 <div class="section-body">
