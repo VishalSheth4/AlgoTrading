@@ -29,6 +29,18 @@ from algoTrading.strategies.mark_dollar_supertrend import MarkDollarSuperTrendSt
 from algoTrading.strategies.rsi_engulfing_strategy import RSIEngulfingStrategy
 
 BASE = Path(__file__).resolve().parent
+CONFIG_YAML = BASE / "config.yaml"
+
+
+def load_risk_per_trade() -> float:
+    """Read risk_per_trade from config.yaml; fall back to Config.RISK_PER_TRADE."""
+    try:
+        import yaml
+        with open(CONFIG_YAML, "r") as f:
+            data = yaml.safe_load(f) or {}
+        return float(data["risk_per_trade"])
+    except Exception:
+        return float(Config.RISK_PER_TRADE)
 
 MAGIC         = 234567   # identifies this bot's orders in MT5
 POLL_INTERVAL = 60       # seconds between scans
@@ -302,13 +314,14 @@ def run_scan(
 
 def main():
     log = setup_logging()
+    risk_per_trade = load_risk_per_trade()
 
     log.info("=" * 60)
     log.info("  ALGO TRADING BOT  —  LIVE MODE")
     log.info(f"  Strategies       : {Config.STRATEGY}")
     log.info(f"  Symbols          : {Config.SYMBOL}")
     log.info(f"  Timeframe        : {Config.TIMEFRAME}")
-    log.info(f"  Risk per trade   : {Config.RISK_PER_TRADE * 100:.1f}%")
+    log.info(f"  Risk per trade   : {risk_per_trade * 100:.1f}%")
     log.info(f"  Lot size         : {Config.LOT_SIZE}")
     log.info(f"  Max daily losses : {getattr(Config, 'MAX_DAILY_LOSSES', 'disabled')}")
     log.info(f"  Poll interval    : {POLL_INTERVAL}s")

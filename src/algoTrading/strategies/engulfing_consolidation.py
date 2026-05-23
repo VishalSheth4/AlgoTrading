@@ -6,9 +6,8 @@ from algoTrading.config import Config
 _YAML_PATH = Path(__file__).resolve().parents[1] / "config.yaml"
 
 RSI_PERIOD    = 14
-RSI_THRESHOLD = 70   # signal only when RSI was overbought on THIS or any of the PREV 3 bars
-EMA_PERIOD    = 200
-
+RSI_THRESHOLD = 70   # arm sell setup only after RSI first moves above this level
+EMA_PERIOD    = 1000
 
 def _load_rr(strategy_key: str) -> float:
     try:
@@ -20,11 +19,21 @@ def _load_rr(strategy_key: str) -> float:
         return float(Config.RR)
 
 
+def _load_lot_size(strategy_key: str) -> float:
+    try:
+        import yaml
+        with open(_YAML_PATH, "r") as f:
+            data = yaml.safe_load(f)
+        return float(data["strategies"][strategy_key]["lot_size"])
+    except Exception:
+        return float(Config.LOT_SIZE)
+
+
 class EngulfingConsolidationStrategy:
     """
     SHORT-only strategy — Pine Script port.
 
-    Signal = consolidation AND engulfingFlag AND rsi_recently_above_70
+    Signal = RSI first moves above 70, then a later consolidation AND engulfingFlag candle appears
 
     Bearish engulfing (engulfingFlag):
       close[1] > open[1]                       prev bullish
@@ -52,7 +61,8 @@ class EngulfingConsolidationStrategy:
 
     def __init__(self):
         self.rr       = _load_rr(self._STRATEGY_KEY)
-        self.lot_size = Config.LOT_SIZE
+        self.lot_size = _load_lot_size(self._STRATEGY_KEY)
+        self.risk_per_trade = Config.RISK_PER_TRADE
 
     # ── 200 EMA ───────────────────────────────────────────────────────────────
     def _compute_ema(self, close: pd.Series) -> pd.Series:
@@ -86,6 +96,7 @@ class EngulfingConsolidationStrategy:
             curr['close'] < df.iloc[i - 2]['close'] and   # close < close[2]
             curr['close'] < df.iloc[i - 3]['close'] and   # close < close[3]
             curr['close'] < df.iloc[i - 4]['close'] and   # close < close[4]
+            curr['close'] < df.iloc[i - 5]['close'] and   # close < close[4]
             curr['high']  > df.iloc[i - 7]['high']        # high  > high[7]
         )
 
@@ -109,17 +120,22 @@ class EngulfingConsolidationStrategy:
         df['sl']     = np.nan
         df['tp']     = np.nan
         df['lot']    = 0.0
+        df['risk_per_trade'] = np.nan
+        df['sl_exit_on_close'] = 0
 
         rsi = self._compute_rsi(df['close'])
         ema = self._compute_ema(df['close'])
+        rsi_sell_armed = False
 
         # start at 200 — ensures EMA(200) warmup + RSI(14) + consolidation lookback (7)
         for i in range(200, len(df)):
             curr = df.iloc[i]
             prev = df.iloc[i - 1]
+            rsi_val = rsi.iloc[i]
+            signal_taken = False
 
             if (curr['close'] < ema.iloc[i]
-                    and self._rsi_recently_above(rsi, i)
+                    and rsi_sell_armed
                     and self._is_bearish_engulfing(prev, curr)
                     and self._consolidation(df, i)):
 
@@ -132,5 +148,12 @@ class EngulfingConsolidationStrategy:
                     df.at[i, 'sl']     = sl
                     df.at[i, 'tp']     = entry - self.rr * risk
                     df.at[i, 'lot']    = self.lot_size
+                    df.at[i, 'risk_per_trade'] = self.risk_per_trade
+                    df.at[i, 'sl_exit_on_close'] = 1
+                    rsi_sell_armed = False
+                    signal_taken = True
+
+            if not signal_taken and pd.notna(rsi_val) and rsi_val > RSI_THRESHOLD:
+                rsi_sell_armed = True
 
         return df

@@ -3,6 +3,8 @@
 # Values here take priority over config.py defaults.
 # =====================================================================
 
+risk_per_trade: 0.02
+
 strategies:
   mark2:
     lot_size: 0.01
@@ -27,4 +29,8 @@ strategies:
 
   rsi_engulfing:
     lot_size: 0.01
-    rr: 3.0
+    rr: 2.0
+
+  rsi_buy_sell:
+    lot_size: 0.01
+    rr: 4.0

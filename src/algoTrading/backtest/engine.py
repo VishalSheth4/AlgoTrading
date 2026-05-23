@@ -97,6 +97,7 @@ class BacktestEngine:
         self.trades = []
         self._tp_mode = Config.TP_MODE          # "rr" | "st" | "both" | "fix_profit"
         self._open_strategy = ""                # strategy name from the signal row
+        self._sl_exit_on_close = True            # stop-loss exits use candle close by default
 
         # ── Daily loss guard ─────────────────────────────────────────────────────
         # Config.MAX_DAILY_LOSSES: int | None — blocks new entries after N losses/day
@@ -171,8 +172,12 @@ class BacktestEngine:
                 if risk_per_unit <= 0:
                     continue
 
+                row_risk_per_trade = row.get("risk_per_trade", self.risk_per_trade)
+                if pd.isna(row_risk_per_trade):
+                    row_risk_per_trade = self.risk_per_trade
+
                 # Size the position so a full SL hit costs exactly risk_amount.
-                risk_amount = self.capital * self.risk_per_trade
+                risk_amount = self.capital * float(row_risk_per_trade)
                 self.position_size = risk_amount / risk_per_unit
 
                 # Store open-trade state.
@@ -181,6 +186,7 @@ class BacktestEngine:
                 self.tp = tp
                 self.position = 1
                 self._open_strategy = row.get("_strategy", "")
+                self._sl_exit_on_close = bool(row.get("sl_exit_on_close", 1))
 
                 # Log the entry event.
                 self.trades.append({
@@ -207,7 +213,7 @@ class BacktestEngine:
                     exit_trade = True
                     exit_reason = "REV"
 
-                elif close < self.sl:
+                elif self._sl_exit_on_close and close < self.sl:
                     # Price CLOSED below the stop-loss level.
                     exit_trade = True
                     exit_reason = "SL"
@@ -243,8 +249,12 @@ class BacktestEngine:
                 if risk_per_unit <= 0:
                     continue
 
+                row_risk_per_trade = row.get("risk_per_trade", self.risk_per_trade)
+                if pd.isna(row_risk_per_trade):
+                    row_risk_per_trade = self.risk_per_trade
+
                 # Size the position so a full SL hit costs exactly risk_amount.
-                risk_amount = self.capital * self.risk_per_trade
+                risk_amount = self.capital * float(row_risk_per_trade)
                 self.position_size = risk_amount / risk_per_unit
 
                 # Store open-trade state.
@@ -253,6 +263,7 @@ class BacktestEngine:
                 self.tp = tp
                 self.position = -1
                 self._open_strategy = row.get("_strategy", "")
+                self._sl_exit_on_close = bool(row.get("sl_exit_on_close", 1))
 
                 # Log the entry event.
                 self.trades.append({
@@ -279,7 +290,7 @@ class BacktestEngine:
                     exit_trade = True
                     exit_reason = "REV"
 
-                elif close > self.sl:
+                elif self._sl_exit_on_close and close > self.sl:
                     # Price CLOSED above the stop-loss level (SL is above entry for shorts).
                     exit_trade = True
                     exit_reason = "SL"

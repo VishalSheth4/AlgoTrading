@@ -90,8 +90,22 @@ from algoTrading.strategies.mark5_supertrend import Mark5SupertrendStrategy
 from algoTrading.strategies.SupertrendCounterFlip_X1 import SupertrendCounterFlipX1Strategy
 from algoTrading.strategies.EmaCrossoverRetestStrategy import EmaCrossoverRetestStrategy
 from algoTrading.strategies.Ema200PullbackEngulfingStrategy import Ema200PullbackEngulfingStrategy
+from algoTrading.strategies.DojiStrategy import DojiStrategy
+from algoTrading.strategies.rsi_buy_sell_strategy import RSIBuySellStrategy
 # Absolute path to the package root (directory that contains main.py).
 BASE = Path(__file__).resolve().parent
+CONFIG_YAML = BASE / "config.yaml"
+
+
+def load_risk_per_trade() -> float:
+    """Read risk_per_trade from config.yaml; fall back to Config.RISK_PER_TRADE."""
+    try:
+        import yaml
+        with open(CONFIG_YAML, "r") as f:
+            data = yaml.safe_load(f) or {}
+        return float(data["risk_per_trade"])
+    except Exception:
+        return float(Config.RISK_PER_TRADE)
 
 # Registry of all available strategy keys → classes.
 # Add new strategies here; Config.STRATEGY selects which ones run.
@@ -109,6 +123,8 @@ STRATEGY_MAP = {
     "SupertrendCounterFlip_X1": SupertrendCounterFlipX1Strategy,
     "EmaCrossoverRetestStrategy": EmaCrossoverRetestStrategy,
     "Ema200PullbackEngulfingStrategy": Ema200PullbackEngulfingStrategy,
+    "DojiStrategy": DojiStrategy,
+    "RSIBuySellStrategy":RSIBuySellStrategy,
 }
 
 
@@ -288,6 +304,8 @@ def _merge_signals(
     merged["sl"]           = np.nan
     merged["tp"]           = np.nan
     merged["lot"]          = 0.0
+    merged["risk_per_trade"] = np.nan
+    merged["sl_exit_on_close"] = 1
     merged["reverse_exit"] = 0
     merged["_strategy"]    = ""
 
@@ -302,6 +320,12 @@ def _merge_signals(
         merged.loc[mask, "tp"]        = sig_df.loc[mask, "tp"]
         merged.loc[mask, "lot"]       = sig_df.loc[mask, "lot"]
         merged.loc[mask, "_strategy"] = name
+
+        if "risk_per_trade" in sig_df.columns:
+            merged.loc[mask, "risk_per_trade"] = sig_df.loc[mask, "risk_per_trade"]
+
+        if "sl_exit_on_close" in sig_df.columns:
+            merged.loc[mask, "sl_exit_on_close"] = sig_df.loc[mask, "sl_exit_on_close"]
 
         # Copy reverse_exit flag only when the strategy provides it.
         if "reverse_exit" in sig_df.columns:
@@ -390,9 +414,10 @@ def run_combined_symbol(symbol: str, strategy_names: list) -> list:
     # ── Run the backtest engine ───────────────────────────────────────────────
     # One engine = one capital account shared across all strategies for this symbol.
     # Config.INITIAL_CAPITAL and Config.RISK_PER_TRADE drive sizing.
+    risk_per_trade = load_risk_per_trade()
     engine = BacktestEngine(
         capital=Config.INITIAL_CAPITAL,         # e.g. 100
-        risk_per_trade=Config.RISK_PER_TRADE,   # e.g. 0.01 → 1 % per trade
+        risk_per_trade=risk_per_trade,          # config.yaml, fallback Config.RISK_PER_TRADE
         symbol=symbol,
     )
     result = engine.run(merged, save=False)     # save=False — we save centrally below
@@ -405,6 +430,7 @@ def run_combined_symbol(symbol: str, strategy_names: list) -> list:
     print(f"    Trades  : {result['total_trades']}  |  W {wins}  L {losses}")
     print(f"    P&L     : {'+' if pnl >= 0 else ''}{pnl:.2f}  ({result['return (%)']:+.2f}%)")
     print(f"    Capital : {Config.INITIAL_CAPITAL} → {result['final_capital']}")
+    print(f"    Risk    : {risk_per_trade * 100:.2f}% per trade")
 
     return engine.trades
 

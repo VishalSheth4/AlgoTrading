@@ -5,15 +5,17 @@
 class Config:
     TIMEFRAME = "M15"
     INITIAL_CAPITAL = 100
-    STRATEGY = "mark2"#,SupertrendCounterFlip_X1"
+    STRATEGY = "engulfing_consolidation,RSIBuySellStrategy,mark_dollar_supertrend"#,mark2"
+    # SupertrendCounterFlip_X1"
     # comma-separated for multi-strategy: STRATEGY = "mark2,mark_dollar_supertrend,engulfing""
-    #Ema200PullbackEngulfingStrategy , EmaCrossoverRetestStrategy
-    RISK_PER_TRADE = 0.08
+    #Ema200PullbackEngulfingStrategy , EmaCrossoverRetestStrategy 
+    # RSIBuySellStrategy
+    RISK_PER_TRADE = 0.02
     #SYMBOL = "XAUUSD"           # comma-separated for multi-symbol: "XAUUSD,EURUSD,GBPUSD,AUDUSD"
-    SYMBOL = "XAUUSD"#,EURUSD,GBPUSD,USDJPY,XAGUSD"  
+    SYMBOL = "XAUUSD"#,EURUSD,GBPUSD,USDJPY,XAGUSD"
     LOT_SIZE = 0.01
-    # STOP_LOSS = 50
-    # TAKE_PROFIT = 100
+    STOP_LOSS = 50
+    TAKE_PROFIT = 100
     MODE = "mt5"   # "mt5" → fetch live from MetaTrader5 | "csv" → use local CSV (Kaggle)
 
     # MT5 account credentials — leave None to use whatever terminal is already open
@@ -23,8 +25,8 @@ class Config:
 
     # Backtest date range — set both to filter bars, or None to use all data.
     # Format: "YYYY-MM-DD"
-    START_DATE = "2018-07-01"   # earliest IC Markets M5 bar
-    END_DATE   = "2026-05-20"          # up to latest available bar
+    START_DATE = "2016-01-01"       # earliest IC Markets M5 bar
+    END_DATE   = "2026-06-01"       # up to latest available bar
 
     # -------------------------------------------------------
     # Mark2 / MarkDollarSuperTrend TP Settings
@@ -41,7 +43,7 @@ class Config:
     # FIX_PROFIT : price units of profit when TP_MODE = "fix_profit"
     #              e.g. 5 → $5 for XAUUSD, 50 pips for EURUSD (0.0050)
     # -------------------------------------------------------
-    RR         = 2.5
+    RR         = 5
     TP_MODE    = "rr"   # "rr" | "st" | "both" | "fix_profit"
     FIX_PROFIT = 5      # price-unit target when TP_MODE = "fix_profit"
 
