@@ -5,12 +5,12 @@
 class Config:
     TIMEFRAME = "M15"
     INITIAL_CAPITAL = 100
-    STRATEGY = "engulfing_consolidation,mark_dollar_supertrend,mark2,Ema200PullbackEngulfingStrategy,SupertrendCounterFlip_X1,EmaCrossoverRetestStrategy"
+    STRATEGY = "ict_simple_1h5m_fvg"#,engulfing_consolidation,mark_dollar_supertrend,mark2,Ema200PullbackEngulfingStrategy,SupertrendCounterFlip_X1,EmaCrossoverRetestStrategy, RSIBuySellStrategy"
     # SupertrendCounterFlip_X1" RSIEMADoubleCrossStrategy RSIBuySellStrategy
     # comma-separated for multi-strategy: STRATEGY = "mark2,mark_dollar_supertrend,engulfing""
     #Ema200PullbackEngulfingStrategy , EmaCrossoverRetestStrategy 
     # RSIBuySellStrategy
-    RISK_PER_TRADE = 0.04
+    RISK_PER_TRADE = 0.02
     SYMBOL = "XAUUSD"           # comma-separated for multi-symbol: "XAUUSD,EURUSD,GBPUSD,AUDUSD"
     # SYMBOL = "XAUUSD,EURUSD,GBPUSD,USDJPY,XAGUSD"
     LOT_SIZE = 0.01

@@ -24,7 +24,12 @@
       "Bash(python -c \"import sys; print\\(sys.executable\\)\")",
       "Bash(python -c \"import pyyaml\")",
       "Bash(venv/Scripts/pip show *)",
-      "Bash(venv/Scripts/pip list *)"
+      "Bash(venv/Scripts/pip list *)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('src/algoTrading/ict_trading_system/strategy/top_down.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('src/algoTrading/ict_trading_system/strategy/init.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(venv/Scripts/python -c \"from algoTrading.ict_trading_system.strategy.top_down import build_top_down_context, scan_top_down, TimeframeAnalysis, TopDownContext, TradeOpportunity, analyze_timeframe, get_trade_bias, find_trade_opportunities; print\\('top_down imports OK'\\)\")",
+      "Bash(./venv/Scripts/python.exe -c \"from algoTrading.ict_trading_system.strategy.top_down import build_top_down_context, scan_top_down, TimeframeAnalysis, TopDownContext, TradeOpportunity, analyze_timeframe, get_trade_bias, find_trade_opportunities; print\\('top_down imports OK'\\)\")",
+      "PowerShell(Get-Command python 2>$null)"
     ]
   }
 }

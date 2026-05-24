@@ -78,3 +78,19 @@ strategies:
   doji_strategy:
     lot_size: 0.01
     rr: 2.0
+
+  # ── ICT-based ────────────────────────────────────────────────────
+  ict_simple_1h5m_fvg:
+    lot_size: 0.01
+    rr: 6.0
+    risk_per_trade: 0.01
+    # Supertrend settings
+    st_period: 10
+    st_mult: 3.0
+    # ICT detection parameters
+    liq_lookback: 20        # bars to scan for swing high/low
+    min_body_ratio: 0.55    # displacement candle body / range threshold
+    sweep_window: 4         # bars after sweep to find displacement
+    fvg_window: 8           # bars after FVG formed to wait for retrace
+    sl_buffer_pct: 0.10     # SL buffer beyond sweep extreme (10% of risk)
+    min_sl_dist: 0.50       # minimum SL distance in price — skip signals with tighter stops

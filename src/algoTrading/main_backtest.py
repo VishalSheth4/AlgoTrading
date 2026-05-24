@@ -93,6 +93,7 @@ from algoTrading.strategies.Ema200PullbackEngulfingStrategy import Ema200Pullbac
 from algoTrading.strategies.DojiStrategy import DojiStrategy
 from algoTrading.strategies.rsi_buy_sell_strategy import RSIBuySellStrategy
 from algoTrading.strategies.RSIEMADoubleCrossStrategy import RSIEMADoubleCrossStrategy
+from algoTrading.strategies.SimpleICT1H5mFVGStrategy import SimpleICT1H5mFVGStrategy
 # Absolute path to the package root (directory that contains main.py).
 BASE = Path(__file__).resolve().parent
 CONFIG_YAML = BASE / "config.yaml"
@@ -126,7 +127,8 @@ STRATEGY_MAP = {
     "Ema200PullbackEngulfingStrategy": Ema200PullbackEngulfingStrategy,
     "DojiStrategy": DojiStrategy,
     "RSIBuySellStrategy":RSIBuySellStrategy,
-    "RSIEMADoubleCrossStrategy":RSIEMADoubleCrossStrategy,
+    "RSIEMADoubleCrossStrategy":    RSIEMADoubleCrossStrategy,
+    "ict_simple_1h5m_fvg":          SimpleICT1H5mFVGStrategy,
 }
 
 

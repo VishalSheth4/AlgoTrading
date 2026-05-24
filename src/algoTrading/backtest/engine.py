@@ -79,12 +79,14 @@ class BacktestEngine:
         Instrument label stored in trade records (mirrors Config.SYMBOL).
     """
 
-    def __init__(self, capital: float, risk_per_trade: float, symbol: str = ""):
+    def __init__(self, capital: float, risk_per_trade: float, symbol: str = "",
+                 max_position_size: float = 10.0):
         # ── Account state ────────────────────────────────────────────────────────
         self.initial_capital = capital
         self.capital = capital
         self.risk_per_trade = risk_per_trade  # Config.RISK_PER_TRADE
         self.symbol = symbol                  # Config.SYMBOL
+        self.max_position_size = max_position_size  # hard cap — prevents micro-SL blowups
 
         # ── Open-position tracking ───────────────────────────────────────────────
         self.position = 0       # 0 = flat, 1 = long, -1 = short
@@ -178,7 +180,7 @@ class BacktestEngine:
 
                 # Size the position so a full SL hit costs exactly risk_amount.
                 risk_amount = self.capital * float(row_risk_per_trade)
-                self.position_size = risk_amount / risk_per_unit
+                self.position_size = min(risk_amount / risk_per_unit, self.max_position_size)
 
                 # Store open-trade state.
                 self.entry_price = close
@@ -255,7 +257,7 @@ class BacktestEngine:
 
                 # Size the position so a full SL hit costs exactly risk_amount.
                 risk_amount = self.capital * float(row_risk_per_trade)
-                self.position_size = risk_amount / risk_per_unit
+                self.position_size = min(risk_amount / risk_per_unit, self.max_position_size)
 
                 # Store open-trade state.
                 self.entry_price = close
