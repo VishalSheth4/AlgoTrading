@@ -1,16 +1,19 @@
+import os
+import sys
 from django.apps import AppConfig
-import threading
-import subprocess
 
 
 class TradingConfig(AppConfig):
-    default_auto_field = 'django.db.models.BigAutoField'
-    name = 'trading'
+    default_auto_field = "django.db.models.BigAutoField"
+    name = "trading"
 
     def ready(self):
-        def run_bot():
-            subprocess.Popen(
-                ["python", "-m", "algoTrading.main_backtest"]
-            )
+        # In Django's dev reloader the outer process also calls ready().
+        # RUN_MAIN is set only in the actual server child process.
+        # For WSGI/production RUN_MAIN is not set — start thread unconditionally.
+        is_runserver = "runserver" in sys.argv
+        if is_runserver and not os.environ.get("RUN_MAIN"):
+            return  # skip in reloader wrapper process
 
-        threading.Thread(target=run_bot).start()
+        from trading.mt5_service import start_live_feed
+        start_live_feed()

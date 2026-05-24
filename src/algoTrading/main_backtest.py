@@ -71,7 +71,7 @@ from pathlib import Path
 from algoTrading.strategies.calendar import ForexFactoryCalendar
 from algoTrading.core.mt5_connector import connect, shutdown
 from algoTrading.dashboard import build_dashboard
-from algoTrading.data.fetch_mt5 import fetch_and_store
+from algoTrading.data.fetch_mt5 import fetch_and_store, fetch_all_timeframes
 from algoTrading.data.loader import load_csv
 from algoTrading.backtest.engine import BacktestEngine
 from algoTrading.backtest.metrics import analyze_trades
@@ -92,6 +92,7 @@ from algoTrading.strategies.EmaCrossoverRetestStrategy import EmaCrossoverRetest
 from algoTrading.strategies.Ema200PullbackEngulfingStrategy import Ema200PullbackEngulfingStrategy
 from algoTrading.strategies.DojiStrategy import DojiStrategy
 from algoTrading.strategies.rsi_buy_sell_strategy import RSIBuySellStrategy
+from algoTrading.strategies.RSIEMADoubleCrossStrategy import RSIEMADoubleCrossStrategy
 # Absolute path to the package root (directory that contains main.py).
 BASE = Path(__file__).resolve().parent
 CONFIG_YAML = BASE / "config.yaml"
@@ -125,6 +126,7 @@ STRATEGY_MAP = {
     "Ema200PullbackEngulfingStrategy": Ema200PullbackEngulfingStrategy,
     "DojiStrategy": DojiStrategy,
     "RSIBuySellStrategy":RSIBuySellStrategy,
+    "RSIEMADoubleCrossStrategy":RSIEMADoubleCrossStrategy,
 }
 
 
@@ -266,6 +268,14 @@ def fetch_symbol(symbol: str, is_first: bool) -> None:
         bars=getattr(Config, "BARS", 200000),  # Config.BARS — max bars per fetch
         save_path=ohlcv_abs,
         from_date=from_date,
+    )
+
+    # Concurrently download all trading timeframes (M5/M15/M30/H1/H4) with 15-min cache
+    fetch_all_timeframes(
+        symbol=symbol,
+        save_dir=BASE / "data",
+        from_date=from_date,
+        bars=getattr(Config, "BARS", 200_000),
     )
 
     if is_first:

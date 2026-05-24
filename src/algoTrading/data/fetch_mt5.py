@@ -15,7 +15,9 @@ TIMEFRAME_MAP = {
     "D1":  mt5.TIMEFRAME_D1,
 }
 
-CACHE_TTL = 3600  # 1 hour in seconds
+CACHE_TTL = 900  # 15 minutes in seconds
+
+MULTI_TIMEFRAMES = ["M5", "M15", "M30", "H1", "H4"]
 
 
 def _meta_path(save_path: str) -> Path:
@@ -113,4 +115,30 @@ def fetch_and_store(symbol, timeframe, bars, save_path, from_date: datetime | No
         "from_date": from_date.strftime("%Y-%m-%d") if from_date else None,
         "cached_at": time.time(),
     }))
-    print(f"📦 Cache written — next refresh in 1h")
+    print(f"📦 Cache written — next refresh in 15min")
+
+
+def fetch_all_timeframes(
+    symbol: str,
+    save_dir,
+    from_date: datetime | None = None,
+    bars: int = 200_000,
+) -> None:
+    """Fetch M5, M15, M30, H1, H4 for one symbol concurrently with 15-min cache."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    save_dir = Path(save_dir)
+
+    def _fetch_one(tf: str):
+        path = str(save_dir / f"ohlcv_{symbol}_{tf}.csv")
+        fetch_and_store(symbol, tf, bars, path, from_date)
+        return tf
+
+    print(f"\n── Multi-TF fetch: {symbol} ({', '.join(MULTI_TIMEFRAMES)}) ─────")
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        futures = {ex.submit(_fetch_one, tf): tf for tf in MULTI_TIMEFRAMES}
+        for fut in as_completed(futures):
+            tf = futures[fut]
+            try:
+                fut.result()
+            except Exception as exc:
+                print(f"  ⚠️  {symbol} {tf} failed: {exc}")

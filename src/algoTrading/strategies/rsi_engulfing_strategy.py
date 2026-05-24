@@ -1,23 +1,10 @@
 import pandas as pd
 import numpy as np
-from pathlib import Path
-from algoTrading.config import Config
-
-_YAML_PATH = Path(__file__).resolve().parents[1] / "config.yaml"
+from algoTrading.strategies.mark2_strategy import _load_rr, _load_lot_size, _load_risk_per_trade
 
 RSI_PERIOD = 14
 RSI_OB     = 70   # overbought — BUY zone
 RSI_OS     = 30   # oversold   — SELL zone
-
-
-def _load_rr(strategy_key: str) -> float:
-    try:
-        import yaml
-        with open(_YAML_PATH, "r") as f:
-            data = yaml.safe_load(f)
-        return float(data["strategies"][strategy_key]["rr"])
-    except Exception:
-        return float(Config.RR)
 
 
 class RSIEngulfingStrategy:
@@ -48,8 +35,9 @@ class RSIEngulfingStrategy:
     _STRATEGY_KEY = "rsi_engulfing"
 
     def __init__(self):
-        self.rr       = _load_rr(self._STRATEGY_KEY)
-        self.lot_size = Config.LOT_SIZE
+        self.rr             = _load_rr(self._STRATEGY_KEY)
+        self.lot_size       = _load_lot_size(self._STRATEGY_KEY)
+        self.risk_per_trade = _load_risk_per_trade(self._STRATEGY_KEY)
 
     # ── RSI (Wilder's RMA — matches Pine Script ta.rsi) ──────────────────────
     def _compute_rsi(self, close: pd.Series) -> pd.Series:

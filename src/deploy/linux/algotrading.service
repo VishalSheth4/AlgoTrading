@@ -1,0 +1,33 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# algotrading.service  —  systemd unit for AlgoTrading dashboard
+#
+# Install:
+#   sudo cp algotrading.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now algotrading
+#
+# Logs:
+#   sudo journalctl -u algotrading -f
+# ─────────────────────────────────────────────────────────────────────────────
+[Unit]
+Description=AlgoTrading Dashboard Server
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# ── Change these two paths to match your setup ───────────────────────────────
+User=ubuntu
+WorkingDirectory=/home/ubuntu/AlgoTrading/src
+ExecStart=/home/ubuntu/AlgoTrading/src/venv/bin/python run_server.py
+# ─────────────────────────────────────────────────────────────────────────────
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Load env from .env file
+EnvironmentFile=-/home/ubuntu/AlgoTrading/src/.env
+
+[Install]
+WantedBy=multi-user.target

@@ -1,11 +1,16 @@
 # =====================================================================
 # config.yaml — per-strategy overrides
 # Values here take priority over config.py defaults.
+#
+# Global risk_per_trade applies to all strategies unless overridden
+# per-strategy below.
 # =====================================================================
 
 risk_per_trade: 0.02
 
 strategies:
+
+  # ── Supertrend-based ─────────────────────────────────────────────
   mark2:
     lot_size: 0.01
     rr: 2.5
@@ -14,8 +19,22 @@ strategies:
     lot_size: 0.01
     rr: 2.5
 
+  mark5_supertrend:
+    lot_size: 0.01
+    rr: 2.5
+
+  supertrend:
+    lot_size: 0.01
+    rr: 2.0
+
+  supertrend_counter_flip_x1:
+    lot_size: 0.01
+    rr: 3.0
+
+  # ── Engulfing-based ──────────────────────────────────────────────
   engulfing:
     lot_size: 0.01
+    rr: 2.0
 
   engulfing_consolidation:
     lot_size: 0.01
@@ -23,10 +42,18 @@ strategies:
 
   engulfing_reversal:
     lot_size: 0.01
+    rr: 2.0
 
-  green_dollar:
+  # ── EMA-based ────────────────────────────────────────────────────
+  ema_crossover_retest:
     lot_size: 0.01
+    rr: 2.0
 
+  ema200_pullback_engulfing:
+    lot_size: 0.01
+    rr: 3.0
+
+  # ── RSI-based ────────────────────────────────────────────────────
   rsi_engulfing:
     lot_size: 0.01
     rr: 2.0
@@ -34,3 +61,20 @@ strategies:
   rsi_buy_sell:
     lot_size: 0.01
     rr: 4.0
+
+  rsi_ema_double_cross:
+    lot_size: 0.01
+    rr: 3.0
+
+  # ── Other ────────────────────────────────────────────────────────
+  moving_average:
+    lot_size: 0.01
+    rr: 2.0
+
+  green_dollar:
+    lot_size: 0.01
+    rr: 2.0
+
+  doji_strategy:
+    lot_size: 0.01
+    rr: 2.0

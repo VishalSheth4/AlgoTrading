@@ -1,15 +1,18 @@
 import pandas as pd
 import numpy as np
-from algoTrading.config import Config
+from algoTrading.strategies.mark2_strategy import _load_rr, _load_lot_size, _load_risk_per_trade
 
 
 class MovingAverageStrategy:
 
+    _STRATEGY_KEY = "moving_average"
+
     def __init__(self, short_window=50, long_window=200):
-        self.short_window = short_window
-        self.long_window  = long_window
-        self.rr           = Config.RR
-        self.lot_size     = Config.LOT_SIZE
+        self.short_window   = short_window
+        self.long_window    = long_window
+        self.rr             = _load_rr(self._STRATEGY_KEY)
+        self.lot_size       = _load_lot_size(self._STRATEGY_KEY)
+        self.risk_per_trade = _load_risk_per_trade(self._STRATEGY_KEY)
 
     def generate_signals(self, df):
         df = df.copy()

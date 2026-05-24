@@ -6,26 +6,43 @@ from algoTrading.config import Config
 _YAML_PATH = Path(__file__).resolve().parents[1] / "config.yaml"
 
 
-def _load_lot_size(strategy_key: str) -> float:
-    """Read lot_size for a strategy from config.yaml; fall back to Config.LOT_SIZE."""
+def _load_yaml() -> dict:
+    """Load config.yaml once; returns empty dict on any error."""
     try:
         import yaml
         with open(_YAML_PATH, "r") as f:
-            data = yaml.safe_load(f)
-        return float(data["strategies"][strategy_key]["lot_size"])
+            return yaml.safe_load(f) or {}
+    except Exception:
+        return {}
+
+
+def _load_lot_size(strategy_key: str) -> float:
+    """Per-strategy lot_size from config.yaml → fallback Config.LOT_SIZE."""
+    try:
+        return float(_load_yaml()["strategies"][strategy_key]["lot_size"])
     except Exception:
         return float(Config.LOT_SIZE)
 
 
 def _load_rr(strategy_key: str) -> float:
-    """Read rr for a strategy from config.yaml; fall back to Config.RR."""
+    """Per-strategy rr from config.yaml → fallback Config.RR."""
     try:
-        import yaml
-        with open(_YAML_PATH, "r") as f:
-            data = yaml.safe_load(f)
-        return float(data["strategies"][strategy_key]["rr"])
+        return float(_load_yaml()["strategies"][strategy_key]["rr"])
     except Exception:
         return float(Config.RR)
+
+
+def _load_risk_per_trade(strategy_key: str) -> float:
+    """Per-strategy risk_per_trade from config.yaml → global yaml value → Config.RISK_PER_TRADE."""
+    data = _load_yaml()
+    try:
+        return float(data["strategies"][strategy_key]["risk_per_trade"])
+    except Exception:
+        pass
+    try:
+        return float(data["risk_per_trade"])
+    except Exception:
+        return float(Config.RISK_PER_TRADE)
 
 
 class Mark2Strategy:
@@ -40,6 +57,7 @@ class Mark2Strategy:
         self.fix_profit        = getattr(Config, 'FIX_PROFIT', 5)
         self.min_trend_candles = Config.MIN_TREND_CANDLES
         self.lot_size          = _load_lot_size(self._STRATEGY_KEY)
+        self.risk_per_trade    = _load_risk_per_trade(self._STRATEGY_KEY)
 
     # =========================================================
     # Supertrend — matches TradingView ta.supertrend(factor, atrPeriod)

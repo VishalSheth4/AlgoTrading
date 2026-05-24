@@ -4,15 +4,15 @@
 
 class Config:
     TIMEFRAME = "M15"
-    INITIAL_CAPITAL = 1000
-    STRATEGY = "engulfing_consolidation,RSIBuySellStrategy,mark_dollar_supertrend,mark2,Ema200PullbackEngulfingStrategy,SupertrendCounterFlip_X1,EmaCrossoverRetestStrategy"
-    # SupertrendCounterFlip_X1"
+    INITIAL_CAPITAL = 100
+    STRATEGY = "engulfing_consolidation,mark_dollar_supertrend,mark2,Ema200PullbackEngulfingStrategy,SupertrendCounterFlip_X1,EmaCrossoverRetestStrategy"
+    # SupertrendCounterFlip_X1" RSIEMADoubleCrossStrategy RSIBuySellStrategy
     # comma-separated for multi-strategy: STRATEGY = "mark2,mark_dollar_supertrend,engulfing""
     #Ema200PullbackEngulfingStrategy , EmaCrossoverRetestStrategy 
     # RSIBuySellStrategy
     RISK_PER_TRADE = 0.04
-    #SYMBOL = "XAUUSD"           # comma-separated for multi-symbol: "XAUUSD,EURUSD,GBPUSD,AUDUSD"
-    SYMBOL = "XAUUSD"#,EURUSD,GBPUSD,USDJPY,XAGUSD"
+    SYMBOL = "XAUUSD"           # comma-separated for multi-symbol: "XAUUSD,EURUSD,GBPUSD,AUDUSD"
+    # SYMBOL = "XAUUSD,EURUSD,GBPUSD,USDJPY,XAGUSD"
     LOT_SIZE = 0.01
     STOP_LOSS = 50
     TAKE_PROFIT = 100
@@ -61,3 +61,7 @@ class Config:
     # Set to None to disable.
     MAX_DAILY_LOSSES = 2
 
+    RSI_PERIOD = 14
+    RSI_EMA_PERIOD= 14
+    RSI_THRESHOLD= 70
+    EMA_PERIOD= 200
