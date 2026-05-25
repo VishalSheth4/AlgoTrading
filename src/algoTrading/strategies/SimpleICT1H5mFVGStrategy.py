@@ -35,7 +35,7 @@ Key parameters (all configurable via config.yaml):
 import numpy as np
 import pandas as pd
 
-from algoTrading.strategies.mark2_strategy import (
+from algoTrading.strategies.SupertrendEngulfingReversalStrategy import (
     _load_rr, _load_lot_size, _load_risk_per_trade, _load_yaml,
 )
 
@@ -79,6 +79,10 @@ class SimpleICT1H5mFVGStrategy:
         # Minimum SL distance in price units — prevents micro-stop blowups.
         # Default 0.50 = 50 ticks on XAUUSD (pip=0.01); set in config.yaml as min_sl_dist.
         self.min_sl_dist    = _load_param("min_sl_dist",    0.50)
+
+        # TP mode: "rr" = fixed RR target | "ema50" = trail with EMA, exit on close cross
+        self.tp_mode        = str(_load_param("tp_mode",      "rr"))
+        self.trail_ema_period = int(_load_param("trail_ema_period", 50))
 
     # ─────────────────────────────────────────────
     # SUPERTREND (Wilder ATR — matches TradingView)
@@ -395,5 +399,58 @@ class SimpleICT1H5mFVGStrategy:
                             df.at[i, "risk_per_trade"] = self.risk_per_trade
 
                         bear_state = "idle"
+
+        # ── EMA50 trailing exit (second pass) ─────────────────────────
+        # When tp_mode = "ema50": exit LONG when close < EMA50,
+        #                         exit SHORT when close > EMA50.
+        # Marks reverse_exit = 1 on the crossing bar.
+        # RR TP is still set at entry as a hard cap (acts as max profit target).
+        if self.tp_mode == "ema50":
+            ema_trail = (
+                df["close"]
+                .ewm(span=self.trail_ema_period, adjust=False)
+                .mean()
+                .values
+            )
+            df["reverse_exit"] = 0
+
+            sigs   = df["signal"].values
+            sl_arr = df["sl"].values
+            tp_arr = df["tp"].values
+
+            trade_dir = 0
+            trade_sl  = 0.0
+            trade_tp  = 0.0
+
+            for i in range(1, len(df)):
+                if sigs[i] != 0:
+                    trade_dir = int(sigs[i])
+                    trade_sl  = float(sl_arr[i])
+                    trade_tp  = float(tp_arr[i])
+                    continue
+
+                if trade_dir == 0:
+                    continue
+
+                c = closes[i]
+                e = ema_trail[i]
+
+                # EMA cross exit
+                if trade_dir == 1 and c < e:      # LONG: close below EMA → exit
+                    df.at[i, "reverse_exit"] = 1
+                    trade_dir = 0
+                    continue
+                if trade_dir == -1 and c > e:     # SHORT: close above EMA → exit
+                    df.at[i, "reverse_exit"] = 1
+                    trade_dir = 0
+                    continue
+
+                # Track SL/TP hits so we stop marking future bars
+                if trade_dir == 1:
+                    if c <= trade_sl or c >= trade_tp:
+                        trade_dir = 0
+                elif trade_dir == -1:
+                    if c >= trade_sl or c <= trade_tp:
+                        trade_dir = 0
 
         return df

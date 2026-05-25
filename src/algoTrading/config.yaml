@@ -1,17 +1,53 @@
 # =====================================================================
-# config.yaml — per-strategy overrides
-# Values here take priority over config.py defaults.
-#
-# Global risk_per_trade applies to all strategies unless overridden
-# per-strategy below.
+# config.yaml — strategy presets + per-strategy overrides
 # =====================================================================
+#
+# ── QUICK SWITCH ─────────────────────────────────────────────────────
+# Change active_preset to one of the names below to switch strategies.
+# You can also add your own preset lines at any time.
+# ─────────────────────────────────────────────────────────────────────
+active_preset: ict_only
 
-risk_per_trade: 0.02
+presets:
+  counter_flip:      "SupertrendCounterFlip_X1" #,ict_simple_1h5m_fvg,SupertrendTouchSell"
+  ict_only:          "ict_simple_1h5m_fvg"
+  engulfing_only:    "engulfing_consolidation"
+  engulfing_reversal_only: "engulfing_reversal"
+  supertrend_engulf: "supertrend_engulfing_reversal"
+  rsi_buy_sell:      "rsi_buy_sell"
+  rsi_ema_cross:     "rsi_ema_double_cross"
+  st_touch:          "SupertrendTouchSell"
+  # ── Combos ──────────────────────────────────────────────────────────
+  flip_plus_ict:     "SupertrendCounterFlip_X1,ict_simple_1h5m_fvg"
+  flip_plus_engulf:  "SupertrendCounterFlip_X1,engulfing_consolidation"
+  all_three:         "SupertrendCounterFlip_X1,ict_simple_1h5m_fvg,engulfing_consolidation"
+  all_supertrend:    "SupertrendCounterFlip_X1,supertrend_engulfing_reversal"
+
+# ─────────────────────────────────────────────────────────────────────
+
+# risk_per_trade uses PERCENTAGE notation: write 8 for 8%, 1 for 1%, 0.5 for 0.5%
+# risk_per_trade: 8
 
 strategies:
 
   # ── Supertrend-based ─────────────────────────────────────────────
-  mark2:
+  supertrend_engulfing_reversal:    # full name for the strategy
+    lot_size: 0.01
+    rr: 5.0
+    tp_mode: "rr"           # "rr" | "st" | "both" | "fix_profit"
+    # ATR candle-size filter — skip spike/news candles
+    atr_filter: true        # set true to enable
+    atr_period: 14
+    atr_mult: 2.0            # skip if (high - low) > atr_mult × ATR
+    # EMA trend filter — only trade with the EMA
+    ema_filter: true        # set true to enable
+    ema_period: 200          # EMA length (e.g. 200 for 200 EMA)
+    # SL-hit reversal — trade in direction of the SL break if engulfing
+    sl_reversal: true       # set true to enable
+    sl_reversal_rr: 1.5      # R:R for the reversal trade
+    min_trend_candles: 14     # min candles in prior trend before signal is valid
+
+  mark2:                          # legacy alias — keeps old runs reproducible
     lot_size: 0.01
     rr: 2.5
 
@@ -28,8 +64,39 @@ strategies:
     rr: 2.0
 
   supertrend_counter_flip_x1:
+    lot_size: 0.02
+    risk_per_trade: 10
+    rr: 2.5
+    tp_mode: "rr"             # "st" | "rr" | "both"
+    st_period: 10
+    st_mult: 3.0
+    # EMA trend filter — LONG above EMA, SHORT below EMA
+    ema_filter: true
+    ema_period: 200
+    # ATR spike filter — skip fill bars where range > atr_mult × ATR
+    atr_filter: true
+    atr_period: 14
+    atr_mult: 2.0
+    # Engulfing / doji thresholds
+    min_body_ratio: 0.50      # engulfing candle body must be ≥ this fraction of its range
+    doji_ratio: 0.10          # X-1 is doji if body/range < this → use X-1 extreme for SL
+    # SL buffer
+    sl_buffer_pct: 0.01       # SL placed beyond reference extreme × (1 ± buffer)
+
+  supertrend_touch_sell:      # 15min , 1.22 factor
     lot_size: 0.01
-    rr: 3.0
+    risk_per_trade: 2         # 2% per trade
+    rr: 7.0                  # 1:3 reward-to-risk
+    st_period: 10             # Supertrend ATR period
+    st_mult: 3.0              # Supertrend multiplier
+    sl_buffer_pct: 0.001      # SL = candle extreme × (1 ± buffer)
+    min_candle_size: 0       # skip signal if candle range < this (price units) | 0 = disabled
+    ema_filter: true          # SHORT only below EMA | LONG only above EMA
+    ema_period: 200
+    atr_filter: true         # skip spike candles > atr_mult × ATR
+    atr_period: 14
+    atr_mult: 2.0
+    min_body_ratio: 0.6       # engulfing body ≥ this fraction of candle range
 
   # ── Engulfing-based ──────────────────────────────────────────────
   engulfing:
@@ -39,6 +106,10 @@ strategies:
   engulfing_consolidation:
     lot_size: 0.01
     rr: 3.0
+    st_period: 10         # Supertrend ATR period
+    st_mult: 3.0          # Supertrend multiplier
+    red_window: 1       # max candles after ST turns red to still allow a trade
+    wick_ratio: 0.5       # upper wick must be ≥ lower wick × this (1.0 = just longer)
 
   engulfing_reversal:
     lot_size: 0.01
@@ -83,7 +154,7 @@ strategies:
   ict_simple_1h5m_fvg:
     lot_size: 0.01
     rr: 6.0
-    risk_per_trade: 0.01
+    risk_per_trade: 1
     # Supertrend settings
     st_period: 10
     st_mult: 3.0
@@ -94,3 +165,5 @@ strategies:
     fvg_window: 8           # bars after FVG formed to wait for retrace
     sl_buffer_pct: 0.10     # SL buffer beyond sweep extreme (10% of risk)
     min_sl_dist: 0.50       # minimum SL distance in price — skip signals with tighter stops
+    tp_mode: "ema50"           # "rr" = fixed RR target | "ema50" = trail exit when close crosses EMA
+    trail_ema_period: 50    # EMA period for trailing exit (only active when tp_mode = "ema50")

@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from algoTrading.strategies.mark2_strategy import _load_rr, _load_lot_size, _load_risk_per_trade
+from algoTrading.strategies.SupertrendEngulfingReversalStrategy import _load_rr, _load_lot_size, _load_risk_per_trade
 
 
 class SupertrendStrategy:

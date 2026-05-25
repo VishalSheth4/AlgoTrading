@@ -346,14 +346,54 @@ def _mark_engulfing(ohlcv: list) -> None:
 
 # ── Data loader ───────────────────────────────────────────────────────────────
 
-def _active_csv() -> Path:
-    """Return live_data.csv when the MT5 feed is active, else sample_data.csv."""
+def _available_symbols() -> dict:
+    """Scan data dir for ohlcv_*.csv; return {SYMBOL: [tf, ...]} ordered M1→D1."""
+    TF_ORDER = ["M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1", "MN"]
+    result: dict = {}
+    for p in sorted((BASE / "data").glob("ohlcv_*.csv")):
+        parts = p.stem.split("_")
+        if len(parts) == 2:          # ohlcv_XAUUSD
+            sym = parts[1]
+            if sym not in result:
+                result[sym] = []
+            meta = p.with_suffix(".meta")
+            if meta.exists():
+                try:
+                    import json as _j
+                    m = _j.loads(meta.read_text(encoding="utf-8"))
+                    base_tf = m.get("timeframe", "D1")
+                    if base_tf not in result[sym]:
+                        result[sym].insert(0, base_tf)
+                except Exception:
+                    pass
+        elif len(parts) == 3:        # ohlcv_XAUUSD_M15
+            sym, t = parts[1], parts[2]
+            if sym not in result:
+                result[sym] = []
+            if t not in result[sym]:
+                result[sym].append(t)
+    for sym in result:
+        result[sym].sort(key=lambda t: TF_ORDER.index(t) if t in TF_ORDER else 99)
+    return result
+
+
+def _active_csv(symbol: str = "", tf: str = "") -> Path:
+    """Prefer ohlcv_{sym}_{tf}.csv → ohlcv_{sym}.csv → live → sample."""
+    sym = (symbol or _SYMBOL).upper().strip()
+    tf  = (tf or "").upper().strip()
+    if tf:
+        p = BASE / "data" / f"ohlcv_{sym}_{tf}.csv"
+        if p.exists():
+            return p
+    p = BASE / "data" / f"ohlcv_{sym}.csv"
+    if p.exists():
+        return p
     return LIVE_CSV if (_live["active"] and LIVE_CSV.exists()) else SAMPLE_CSV
 
 
-def _load(limit: int = 0):
+def _load(limit: int = 0, symbol: str = "", tf: str = ""):
     """Load OHLCV data. limit=0 means all available bars."""
-    csv_p = _active_csv()
+    csv_p = _active_csv(symbol, tf)
     df = pd.read_csv(csv_p, usecols=["time", "open", "high", "low", "close"])
     df["time"] = pd.to_datetime(df["time"])
     df = df.sort_values("time").reset_index(drop=True)
@@ -381,6 +421,14 @@ def _load(limit: int = 0):
 
 
 # ── Trade analytics ───────────────────────────────────────────────────────────
+
+def _current_timeframe() -> str:
+    """Re-read Config.TIMEFRAME each call so dashboard reflects config changes."""
+    try:
+        from algoTrading.config import Config as _C
+        return _C.TIMEFRAME
+    except Exception:
+        return _TIMEFRAME
 
 def _calc_streaks(profits: list) -> tuple:
     max_win = max_loss = cur = 0
@@ -412,14 +460,17 @@ def _streak_trades(done: pd.DataFrame, profits: list, is_win: bool) -> list:
             cur_len = 0
     rows = []
     for _, r in done.iloc[best_start:best_start + best_len].iterrows():
+        lot_v = r.get("lot_size")
         rows.append({
-            "time":   str(r["time"])[:16],
-            "symbol": str(r.get("symbol", "")),
-            "dir":    "SHORT" if r["type"] == "COVER" else "LONG",
-            "entry":  round(float(r.get("entry_price", 0)), 2),
-            "exit":   round(float(r.get("exit_price",  0)), 2),
-            "profit": round(float(r["profit"]), 2),
-            "cap":    round(float(r["capital"]), 2),
+            "time":     str(r["time"])[:16],
+            "symbol":   str(r.get("symbol",   "")),
+            "strategy": str(r.get("strategy", "—")),
+            "dir":      "SHORT" if r["type"] == "COVER" else "LONG",
+            "entry":    round(float(r.get("entry_price", 0)), 2),
+            "exit":     round(float(r.get("exit_price",  0)), 2),
+            "lot":      f"{float(lot_v):.2f}" if pd.notna(lot_v) else "—",
+            "profit":   round(float(r["profit"]), 2),
+            "cap":      round(float(r["capital"]), 2),
         })
     return rows
 
@@ -526,7 +577,7 @@ def _compute_trade_analytics() -> dict:
                 "symbol":   str(r.get("symbol",   "")),
                 "strategy": str(r.get("strategy", "")),
                 "dir":      "SHORT" if r["type"] == "COVER" else "LONG",
-                "lot":      f"{float(lot_v):.4f}" if pd.notna(lot_v) else "—",
+                "lot":      f"{float(lot_v):.2f}" if pd.notna(lot_v) else "—",
                 "profit":   round(float(r["profit"]), 2),
                 "label":    str(r.get("exit_label", r.get("exit_reason", ""))),
             })
@@ -592,7 +643,7 @@ def _compute_trade_analytics() -> dict:
     for idx, (_, r) in enumerate(done.iterrows()):
         sl_v  = r.get("sl");  sl_s  = f"{float(sl_v):.2f}"  if pd.notna(sl_v)  else "—"
         tp_v  = r.get("tp");  tp_s  = f"{float(tp_v):.2f}"  if pd.notna(tp_v)  else "—"
-        lot_v = r.get("lot_size"); lot_s = f"{float(lot_v):.4f}" if pd.notna(lot_v) else "—"
+        lot_v = r.get("lot_size"); lot_s = f"{float(lot_v):.2f}" if pd.notna(lot_v) else "—"
         rows.append({
             "num":      idx + 1,
             "time":     str(r["time"])[:16],
@@ -619,7 +670,7 @@ def _compute_trade_analytics() -> dict:
         "meta": {
             "strategies": strategies_str,
             "symbols":    symbols_str,
-            "timeframe":  _TIMEFRAME,
+            "timeframe":  _current_timeframe(),
             "n":          n,
             "date_from":  date_from[:10],
             "date_to":    date_to[:10],
@@ -721,12 +772,20 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/status":
             self._json(200, {"live": dict(_live)})
 
+        elif path == "/symbols":
+            try:
+                self._json(200, _available_symbols())
+            except Exception as exc:
+                self._json(500, {"error": str(exc)})
+
         elif path == "/ohlcv":
             try:
-                limit = int(qs.get("limit", [0])[0])
+                limit  = int(qs.get("limit", [0])[0])
+                sym    = qs.get("sym", [""])[0].strip()
+                tf_req = qs.get("tf",  [""])[0].strip()
                 if limit < 0:
-                    limit = 0   # 0 = all bars
-                ohlcv, supertrend, markers = _load(limit)
+                    limit = 0
+                ohlcv, supertrend, markers = _load(limit, sym, tf_req)
                 self._json(200, {
                     "ohlcv":      ohlcv,
                     "supertrend": supertrend,

@@ -54,7 +54,7 @@ def fetch_and_store(symbol, timeframe, bars, save_path, from_date: datetime | No
 
     # ── Cache hit: skip MT5 fetch ─────────────────────────────────
     if _cache_valid(save_path, timeframe, from_date):
-        meta      = json.loads(_meta_path(save_path).read_text())
+        meta      = json.loads(_meta_path(save_path).read_text(encoding="utf-8"))
         age_min   = int((time.time() - meta["cached_at"]) / 60)
         remaining = int((CACHE_TTL - (time.time() - meta["cached_at"])) / 60)
         print(f"✅ Cache hit — {symbol} {timeframe} | cached {age_min}m ago | refreshes in ~{remaining}m")
@@ -114,7 +114,7 @@ def fetch_and_store(symbol, timeframe, bars, save_path, from_date: datetime | No
         "bars":      len(df),
         "from_date": from_date.strftime("%Y-%m-%d") if from_date else None,
         "cached_at": time.time(),
-    }))
+    }), encoding="utf-8")
     print(f"📦 Cache written — next refresh in 15min")
 
 

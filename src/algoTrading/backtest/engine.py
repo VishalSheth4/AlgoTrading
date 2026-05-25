@@ -56,9 +56,15 @@ USAGE
     results = engine.run(df)   # df must have columns: time, close, signal, sl, tp
 """
 
+import math
 import pandas as pd
 from pathlib import Path
 from algoTrading.config import Config
+
+# Minimum and step size for position sizing.
+# All instruments use 0.01 as the standard lot step.
+_LOT_STEP = 0.01
+_LOT_MIN  = 0.01
 
 
 class BacktestEngine:
@@ -80,13 +86,20 @@ class BacktestEngine:
     """
 
     def __init__(self, capital: float, risk_per_trade: float, symbol: str = "",
-                 max_position_size: float = 10.0):
+                 max_position_size: float = 10.0, min_sl_dist: float = 0.10):
         # ── Account state ────────────────────────────────────────────────────────
         self.initial_capital = capital
         self.capital = capital
         self.risk_per_trade = risk_per_trade  # Config.RISK_PER_TRADE
         self.symbol = symbol                  # Config.SYMBOL
         self.max_position_size = max_position_size  # hard cap — prevents micro-SL blowups
+        self.min_sl_dist = min_sl_dist        # skip any signal where SL distance < this
+
+        # Contract size: units per standard lot (100 for XAUUSD, 100000 for forex).
+        # Applied to BOTH position sizing and P&L so risk math is correct.
+        _cs_map = getattr(Config, "CONTRACT_SIZES", {})
+        _default = getattr(Config, "DEFAULT_CONTRACT_SIZE", 100000)
+        self.contract_size = float(_cs_map.get(symbol, _default))
 
         # ── Open-position tracking ───────────────────────────────────────────────
         self.position = 0       # 0 = flat, 1 = long, -1 = short
@@ -174,13 +187,20 @@ class BacktestEngine:
                 if risk_per_unit <= 0:
                     continue
 
+                # Skip if SL is too close — prevents micro-stop lot explosions.
+                if risk_per_unit < self.min_sl_dist:
+                    continue
+
                 row_risk_per_trade = row.get("risk_per_trade", self.risk_per_trade)
                 if pd.isna(row_risk_per_trade):
                     row_risk_per_trade = self.risk_per_trade
 
-                # Size the position so a full SL hit costs exactly risk_amount.
+                # Size position: floor to nearest lot step, cap at max.
+                # Divide by contract_size so risk is measured in account currency.
                 risk_amount = self.capital * float(row_risk_per_trade)
-                self.position_size = min(risk_amount / risk_per_unit, self.max_position_size)
+                raw_size    = risk_amount / (risk_per_unit * self.contract_size)
+                floored     = math.floor(raw_size / _LOT_STEP) * _LOT_STEP
+                self.position_size = min(max(_LOT_MIN, floored), self.max_position_size)
 
                 # Store open-trade state.
                 self.entry_price = close
@@ -251,13 +271,20 @@ class BacktestEngine:
                 if risk_per_unit <= 0:
                     continue
 
+                # Skip if SL is too close — prevents micro-stop lot explosions.
+                if risk_per_unit < self.min_sl_dist:
+                    continue
+
                 row_risk_per_trade = row.get("risk_per_trade", self.risk_per_trade)
                 if pd.isna(row_risk_per_trade):
                     row_risk_per_trade = self.risk_per_trade
 
-                # Size the position so a full SL hit costs exactly risk_amount.
+                # Size position: floor to nearest lot step, cap at max.
+                # Divide by contract_size so risk is measured in account currency.
                 risk_amount = self.capital * float(row_risk_per_trade)
-                self.position_size = min(risk_amount / risk_per_unit, self.max_position_size)
+                raw_size    = risk_amount / (risk_per_unit * self.contract_size)
+                floored     = math.floor(raw_size / _LOT_STEP) * _LOT_STEP
+                self.position_size = min(max(_LOT_MIN, floored), self.max_position_size)
 
                 # Store open-trade state.
                 self.entry_price = close
@@ -359,12 +386,12 @@ class BacktestEngine:
         time        : any    — bar timestamp forwarded to the trade record
         direction   : int    — +1 for long, -1 for short
         """
-        # Profit = price move in favour of direction × size.
+        # Profit = price move × lots × contract_size (units per lot).
         if direction == 1:
-            profit = (exit_price - self.entry_price) * self.position_size
+            profit = (exit_price - self.entry_price) * self.position_size * self.contract_size
             exit_type = "SELL"
         else:
-            profit = (self.entry_price - exit_price) * self.position_size
+            profit = (self.entry_price - exit_price) * self.position_size * self.contract_size
             exit_type = "COVER"
 
         self.capital += profit

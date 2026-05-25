@@ -1,159 +1,160 @@
-import pandas as pd
+"""
+EngulfingConsolidation  (SHORT only)
+=====================================
+Takes a SELL when:
+  1. Supertrend filter passes (see below), AND
+  2. Bearish engulfing candle with upper wick longer than lower wick
+
+BEARISH ENGULFING + UPPER WICK condition:
+  • Previous candle was bullish         (prev close > prev open)
+  • Current candle is bearish           (curr open  > curr close)
+  • Current opens  ≥ previous close    (opens at / above prev close)
+  • Previous open  ≥ current close     (fully engulfs prev body)
+  • Current body   >  previous body    (stronger move)
+  • Upper wick     >  lower wick × wick_ratio
+      upper_wick = curr high  − curr open   (rejection from top)
+      lower_wick = curr close − curr low    (tail from bottom)
+    → wick_ratio = 1.0 means upper wick just needs to be longer
+    → increase wick_ratio (e.g. 1.5) for a stronger rejection signal
+
+SUPERTREND filter:
+  GREEN (trend = +1) → any signal allowed
+  RED   (trend = -1) → only the first red_window candles after the flip
+
+ENTRY / SL / TP:
+  Entry  : close of signal candle
+  SL     : max high of the previous 4 candles
+  TP     : entry − rr × risk
+
+All parameters in config.yaml under engulfing_consolidation.
+"""
+
 import numpy as np
-from pathlib import Path
-from algoTrading.config import Config
+import pandas as pd
 
-_YAML_PATH = Path(__file__).resolve().parents[1] / "config.yaml"
+from algoTrading.strategies.SupertrendEngulfingReversalStrategy import (
+    Mark2Strategy,
+    _load_rr,
+    _load_lot_size,
+    _load_risk_per_trade,
+    _load_param,
+)
 
-RSI_PERIOD    = 14
-RSI_THRESHOLD = 70   # arm sell setup only after RSI first moves above this level
-EMA_PERIOD    = 1000
-
-def _load_rr(strategy_key: str) -> float:
-    try:
-        import yaml
-        with open(_YAML_PATH, "r") as f:
-            data = yaml.safe_load(f)
-        return float(data["strategies"][strategy_key]["rr"])
-    except Exception:
-        return float(Config.RR)
+_KEY = "engulfing_consolidation"
 
 
-def _load_lot_size(strategy_key: str) -> float:
-    try:
-        import yaml
-        with open(_YAML_PATH, "r") as f:
-            data = yaml.safe_load(f)
-        return float(data["strategies"][strategy_key]["lot_size"])
-    except Exception:
-        return float(Config.LOT_SIZE)
+class EngulfingConsolidationStrategy(Mark2Strategy):
 
+    _STRATEGY_KEY = _KEY
 
-class EngulfingConsolidationStrategy:
-    """
-    SHORT-only strategy — Pine Script port.
+    def __init__(self, period=None, multiplier=None):
+        p = period     or int(_load_param(_KEY,   "st_period",   10))
+        m = multiplier or float(_load_param(_KEY, "st_mult",     3.0))
+        super().__init__(p, m)
 
-    Signal = RSI first moves above 70, then a later consolidation AND engulfingFlag candle appears
+        self.rr             = _load_rr(_KEY)
+        self.lot_size       = _load_lot_size(_KEY)
+        self.risk_per_trade = _load_risk_per_trade(_KEY)
 
-    Bearish engulfing (engulfingFlag):
-      close[1] > open[1]                       prev bullish
-      open > close                              curr bearish
-      open >= close[1]                          gaps up / opens at prev close
-      open[1] >= close                          fully engulfs prev body
-      open - close > close[1] - open[1]        curr body larger than prev body
+        # Candles allowed after ST turns RED before window closes
+        self.red_window  = int(_load_param(_KEY,   "red_window",  10))
+        # Upper wick must be > lower wick × this ratio
+        self.wick_ratio  = float(_load_param(_KEY, "wick_ratio",  1.0))
 
-    Consolidation:
-      close < close[1..4]                       closing below previous 4 bars
-      high  > high[7]                           wick breaks above 7-bar range (failed breakout)
+    # ─────────────────────────────────────────────────────────────────
 
-    RSI filter:
-      RSI(14) crossed above 70 on this bar OR any of the 3 bars before it.
-      Matches Pine Script "rsiAbove70 and engulfingFlag" logic — RSI doesn't
-      have to be EXACTLY >70 on the engulfing bar, only recently overbought.
+    def _resolve_st_columns(self, df: pd.DataFrame):
+        trend_col = "st_trend" if "st_trend" in df.columns else "trend"
+        for c in ("st_value", "supertrend", "st"):
+            if c in df.columns:
+                return trend_col, c
+        raise KeyError(f"Supertrend column not found. Available: {df.columns.tolist()}")
 
-    Trade:
-      Entry : close of signal bar
-      SL    : max(high[1], high[2], high[3], high[4])  — top of consolidation zone
-      TP    : entry - RR * risk
-    """
+    # ─────────────────────────────────────────────────────────────────
+    # Bearish engulfing with upper-wick dominance
+    # ─────────────────────────────────────────────────────────────────
 
-    _STRATEGY_KEY = "engulfing_consolidation"
+    def _is_valid_candle(self, prev: pd.Series, curr: pd.Series) -> bool:
+        # ── Bearish engulfing ─────────────────────────────────────────
+        if not (
+            prev["close"] > prev["open"]                                          # prev bullish
+            and curr["open"]  > curr["close"]                                     # curr bearish
+            and curr["open"]  >= prev["close"]                                    # opens at/above prev close
+            and prev["open"]  >= curr["close"]                                    # fully engulfs prev body
+            and (curr["open"] - curr["close"]) > (prev["close"] - prev["open"])   # bigger body
+        ):
+            return False
 
-    def __init__(self):
-        self.rr       = _load_rr(self._STRATEGY_KEY)
-        self.lot_size = _load_lot_size(self._STRATEGY_KEY)
-        self.risk_per_trade = Config.RISK_PER_TRADE
+        # ── Upper wick must dominate lower wick ──────────────────────
+        upper_wick = curr["high"]  - curr["open"]    # wick above body (rejection from top)
+        lower_wick = curr["close"] - curr["low"]     # tail below body
 
-    # ── 200 EMA ───────────────────────────────────────────────────────────────
-    def _compute_ema(self, close: pd.Series) -> pd.Series:
-        return close.ewm(span=EMA_PERIOD, adjust=False).mean()
+        # Avoid zero-division; if no lower wick at all, upper wick always wins
+        if lower_wick <= 0:
+            return upper_wick > 0
 
-    # ── RSI (Wilder's RMA — matches Pine Script ta.rsi) ──────────────────────
-    def _compute_rsi(self, close: pd.Series) -> pd.Series:
-        delta    = close.diff()
-        gain     = delta.clip(lower=0)
-        loss     = (-delta).clip(lower=0)
-        avg_gain = gain.ewm(alpha=1 / RSI_PERIOD, min_periods=RSI_PERIOD, adjust=False).mean()
-        avg_loss = loss.ewm(alpha=1 / RSI_PERIOD, min_periods=RSI_PERIOD, adjust=False).mean()
-        rs       = avg_gain / avg_loss
-        return 100 - (100 / (1 + rs))
+        return upper_wick >= lower_wick * self.wick_ratio
 
-    # ── Pine Script: engulfingFlag ────────────────────────────────────────────
-    def _is_bearish_engulfing(self, prev, curr) -> bool:
-        return (
-            prev['close'] > prev['open'] and                                 # close[1] > open[1]
-            curr['open']  > curr['close'] and                                # open > close
-            curr['open']  >= prev['close'] and                               # open >= close[1]
-            prev['open']  >= curr['close'] and                               # open[1] >= close
-            (curr['open'] - curr['close']) > (prev['close'] - prev['open'])  # bigger body
-        )
+    # ─────────────────────────────────────────────────────────────────
+    # Signal generation
+    # ─────────────────────────────────────────────────────────────────
 
-    # ── Pine Script: consolidation ────────────────────────────────────────────
-    def _consolidation(self, df: pd.DataFrame, i: int) -> bool:
-        curr = df.iloc[i]
-        return (
-            curr['close'] < df.iloc[i - 1]['close'] and   # close < close[1]
-            curr['close'] < df.iloc[i - 2]['close'] and   # close < close[2]
-            curr['close'] < df.iloc[i - 3]['close'] and   # close < close[3]
-            curr['close'] < df.iloc[i - 4]['close'] and   # close < close[4]
-            curr['close'] < df.iloc[i - 5]['close'] and   # close < close[4]
-            curr['high']  > df.iloc[i - 7]['high']        # high  > high[7]
-        )
-
-    # ── RSI recently overbought (within last 3 bars) ──────────────────────────
-    def _rsi_recently_above(self, rsi: pd.Series, i: int) -> bool:
-        """
-        TV's bgcolor fires when RSI > 70 on the SAME bar as engulfing.
-        In practice the engulfing candle itself may have RSI slightly under 70
-        because the close dropped — check the current bar AND the 3 prior bars.
-        """
-        for lookback in range(0, 4):   # i, i-1, i-2, i-3
-            val = rsi.iloc[i - lookback]
-            if pd.notna(val) and val > RSI_THRESHOLD:
-                return True
-        return False
-
-    # ── Signal generation ─────────────────────────────────────────────────────
     def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
-        df['signal'] = 0
-        df['sl']     = np.nan
-        df['tp']     = np.nan
-        df['lot']    = 0.0
-        df['risk_per_trade'] = np.nan
-        df['sl_exit_on_close'] = 0
+        df = self.calculate_supertrend(df)
 
-        rsi = self._compute_rsi(df['close'])
-        ema = self._compute_ema(df['close'])
-        rsi_sell_armed = False
+        trend_col, _ = self._resolve_st_columns(df)
+        trend = df[trend_col].values
 
-        # start at 200 — ensures EMA(200) warmup + RSI(14) + consolidation lookback (7)
-        for i in range(200, len(df)):
-            curr = df.iloc[i]
-            prev = df.iloc[i - 1]
-            rsi_val = rsi.iloc[i]
-            signal_taken = False
+        df["signal"]           = 0
+        df["sl"]               = np.nan
+        df["tp"]               = np.nan
+        df["lot"]              = 0.0
+        df["risk_per_trade"]   = np.nan
+        df["sl_exit_on_close"] = 0
 
-            if (curr['close'] < ema.iloc[i]
-                    and rsi_sell_armed
-                    and self._is_bearish_engulfing(prev, curr)
-                    and self._consolidation(df, i)):
+        highs = df["high"].values
+        n     = len(df)
 
-                entry = curr['close']
-                sl    = max(df.iloc[i - 1]['high'], df.iloc[i - 2]['high'],
-                            df.iloc[i - 3]['high'], df.iloc[i - 4]['high'])
-                risk  = sl - entry
-                if risk > 0:
-                    df.at[i, 'signal'] = -1
-                    df.at[i, 'sl']     = sl
-                    df.at[i, 'tp']     = entry - self.rr * risk
-                    df.at[i, 'lot']    = self.lot_size
-                    df.at[i, 'risk_per_trade'] = self.risk_per_trade
-                    df.at[i, 'sl_exit_on_close'] = 1
-                    rsi_sell_armed = False
-                    signal_taken = True
+        bars_since_red = 0
 
-            if not signal_taken and pd.notna(rsi_val) and rsi_val > RSI_THRESHOLD:
-                rsi_sell_armed = True
+        for i in range(7, n):
+
+            # ── Track red-window counter ──────────────────────────────
+            if trend[i] == -1 and trend[i - 1] == 1:
+                bars_since_red = 1
+            elif trend[i] == -1:
+                if bars_since_red > 0:
+                    bars_since_red += 1
+            else:
+                bars_since_red = 0
+
+            # ── Supertrend filter ─────────────────────────────────────
+            # GREEN → always allowed
+            # RED   → only within first red_window bars after flip
+            st_allows = (
+                trend[i] == 1
+                or (trend[i] == -1 and 0 < bars_since_red <= self.red_window)
+            )
+            if not st_allows:
+                continue
+
+            # ── Candle check: bearish engulfing + upper wick ──────────
+            if not self._is_valid_candle(df.iloc[i - 1], df.iloc[i]):
+                continue
+
+            # ── Build trade ───────────────────────────────────────────
+            entry = df.iloc[i]["close"]
+            sl    = float(np.max(highs[i - 4: i]))   # highest high of prev 4 bars
+            risk  = sl - entry
+            if risk <= 0:
+                continue
+
+            df.at[i, "signal"]           = -1
+            df.at[i, "sl"]               = round(sl,                    5)
+            df.at[i, "tp"]               = round(entry - self.rr * risk, 5)
+            df.at[i, "lot"]              = self.lot_size
+            df.at[i, "risk_per_trade"]   = self.risk_per_trade
+            df.at[i, "sl_exit_on_close"] = 1
 
         return df

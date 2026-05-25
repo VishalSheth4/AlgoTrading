@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from algoTrading.strategies.mark2_strategy import Mark2Strategy
+from algoTrading.strategies.SupertrendEngulfingReversalStrategy import Mark2Strategy
 
 
 class RSIBuySellStrategy(Mark2Strategy):

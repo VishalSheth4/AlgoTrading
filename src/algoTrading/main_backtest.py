@@ -82,7 +82,7 @@ from algoTrading.strategies.supertrend_strategy import SupertrendStrategy
 from algoTrading.strategies.engulfing_strategy import EngulfingStrategy
 from algoTrading.strategies.green_dollar import GreenDollarStrategy
 from algoTrading.strategies.engulfing_consolidation import EngulfingConsolidationStrategy
-from algoTrading.strategies.mark2_strategy import Mark2Strategy
+from algoTrading.strategies.SupertrendEngulfingReversalStrategy import Mark2Strategy, SupertrendEngulfingReversalStrategy
 from algoTrading.strategies.engulfing_reversal import EngulfingReversalStrategy
 from algoTrading.strategies.mark_dollar_supertrend import MarkDollarSuperTrendStrategy
 from algoTrading.strategies.rsi_engulfing_strategy import RSIEngulfingStrategy
@@ -94,20 +94,35 @@ from algoTrading.strategies.DojiStrategy import DojiStrategy
 from algoTrading.strategies.rsi_buy_sell_strategy import RSIBuySellStrategy
 from algoTrading.strategies.RSIEMADoubleCrossStrategy import RSIEMADoubleCrossStrategy
 from algoTrading.strategies.SimpleICT1H5mFVGStrategy import SimpleICT1H5mFVGStrategy
+from algoTrading.strategies.SupertrendTouchSellStrategy import SupertrendTouchSellStrategy
 # Absolute path to the package root (directory that contains main.py).
 BASE = Path(__file__).resolve().parent
 CONFIG_YAML = BASE / "config.yaml"
 
 
 def load_risk_per_trade() -> float:
-    """Read risk_per_trade from config.yaml; fall back to Config.RISK_PER_TRADE."""
+    """Read risk_per_trade from config.yaml (per-strategy → global → fallback)."""
     try:
         import yaml
         with open(CONFIG_YAML, "r") as f:
             data = yaml.safe_load(f) or {}
-        return float(data["risk_per_trade"])
+        # 1. Try active strategy's per-strategy risk_per_trade
+        preset = data.get("active_preset", "").strip()
+        if preset:
+            strat_val = data.get("presets", {}).get(preset, preset)
+            first_name = strat_val.split(",")[0].strip()
+            strats = data.get("strategies", {})
+            # Normalize: strip underscores + lowercase for flexible matching
+            norm = lambda s: s.replace("_", "").lower()
+            for yaml_key, yaml_cfg in strats.items():
+                if norm(yaml_key) == norm(first_name) and "risk_per_trade" in yaml_cfg:
+                    return float(yaml_cfg["risk_per_trade"]) / 100.0
+        # 2. Global yaml risk_per_trade
+        if "risk_per_trade" in data:
+            return float(data["risk_per_trade"]) / 100.0
     except Exception:
-        return float(Config.RISK_PER_TRADE)
+        pass
+    return float(getattr(Config, "RISK_PER_TRADE", 0.08))
 
 # Registry of all available strategy keys → classes.
 # Add new strategies here; Config.STRATEGY selects which ones run.
@@ -119,6 +134,7 @@ STRATEGY_MAP = {
     "engulfing_consolidation": EngulfingConsolidationStrategy,
     "engulfing_reversal":      EngulfingReversalStrategy,
     "mark2":                   Mark2Strategy,
+    "supertrend_engulfing_reversal": SupertrendEngulfingReversalStrategy,
     "mark_dollar_supertrend":  MarkDollarSuperTrendStrategy,
     "rsi_engulfing":           RSIEngulfingStrategy,
     "mark5_supertrend":        Mark5SupertrendStrategy,
@@ -129,6 +145,7 @@ STRATEGY_MAP = {
     "RSIBuySellStrategy":RSIBuySellStrategy,
     "RSIEMADoubleCrossStrategy":    RSIEMADoubleCrossStrategy,
     "ict_simple_1h5m_fvg":          SimpleICT1H5mFVGStrategy,
+    "SupertrendTouchSell":          SupertrendTouchSellStrategy,
 }
 
 
@@ -431,6 +448,7 @@ def run_combined_symbol(symbol: str, strategy_names: list) -> list:
         capital=Config.INITIAL_CAPITAL,         # e.g. 100
         risk_per_trade=risk_per_trade,          # config.yaml, fallback Config.RISK_PER_TRADE
         symbol=symbol,
+        min_sl_dist=0.10,                       # skip signals where SL < 0.10 pts from entry
     )
     result = engine.run(merged, save=False)     # save=False — we save centrally below
 

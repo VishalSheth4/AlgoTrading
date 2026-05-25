@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from algoTrading.config import Config
-from algoTrading.strategies.mark2_strategy import Mark2Strategy
+from algoTrading.strategies.SupertrendEngulfingReversalStrategy import Mark2Strategy
 
 
 class DojiStrategy(Mark2Strategy):
