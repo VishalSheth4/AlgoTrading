@@ -270,27 +270,45 @@ def load_trade_markers(ohlcv: list) -> list:
 
     markers = []
     for _, row in df.iterrows():
-        bt     = snap(int(row["ts"]))
+        bt = snap(int(row["ts"]))
         if bt is None:
             continue
         t      = row["type"]
         reason = str(row.get("exit_reason", "")) if pd.notna(row.get("exit_reason")) else ""
+        label  = str(row.get("exit_label",  "")) if pd.notna(row.get("exit_label"))  else reason
+        ep     = row.get("entry_price")
+        ep_s   = f" {float(ep):.1f}" if pd.notna(ep) else ""
+
         if t == "BUY":
-            markers.append({"time": bt, "position": "belowBar",
-                            "color": "#26a69a", "shape": "arrowUp",   "text": "B", "size": 1})
+            markers.append({
+                "time": bt, "position": "belowBar",
+                "color": "#26a69a", "shape": "arrowUp",
+                "text": f"BUY{ep_s}", "size": 2,
+            })
         elif t == "SHORT":
-            markers.append({"time": bt, "position": "aboveBar",
-                            "color": "#ef5350", "shape": "arrowDown", "text": "S", "size": 1})
+            markers.append({
+                "time": bt, "position": "aboveBar",
+                "color": "#ef5350", "shape": "arrowDown",
+                "text": f"SELL{ep_s}", "size": 2,
+            })
         elif t == "SELL":
-            markers.append({"time": bt,
-                            "position": "aboveBar" if reason != "TP" else "aboveBar",
-                            "color": "#26a69a" if reason == "TP" else "#ef5350",
-                            "shape": "circle", "text": "T" if reason == "TP" else "SL", "size": 1})
+            is_tp = label in ("TP", "R:R", "ST")
+            markers.append({
+                "time": bt, "position": "aboveBar",
+                "color": "#26a69a" if is_tp else "#ef5350",
+                "shape": "circle",
+                "text": label if label else ("TP" if is_tp else "SL"),
+                "size": 1,
+            })
         elif t == "COVER":
-            markers.append({"time": bt,
-                            "position": "belowBar",
-                            "color": "#26a69a" if reason == "TP" else "#ef5350",
-                            "shape": "circle", "text": "T" if reason == "TP" else "SL", "size": 1})
+            is_tp = label in ("TP", "R:R", "ST")
+            markers.append({
+                "time": bt, "position": "belowBar",
+                "color": "#26a69a" if is_tp else "#ef5350",
+                "shape": "circle",
+                "text": label if label else ("TP" if is_tp else "SL"),
+                "size": 1,
+            })
     markers.sort(key=lambda m: m["time"])
     return markers
 
@@ -522,26 +540,35 @@ def compute_trade_analytics() -> dict:
                 "losses": sl_, "profit": sp, "win_rate": swr, "profit_pct": spct,
             })
 
+    # Build entry_time lookup: pair BUY/SHORT rows with SELL/COVER rows sequentially
+    all_df = pd.read_csv(TRADE_CSV)
+    entries_df = all_df[all_df["type"].isin(["BUY", "SHORT"])].copy()
+    entries_df["time"] = pd.to_datetime(entries_df["time"], errors="coerce")
+    entries_df = entries_df.sort_values("time").reset_index(drop=True)
+    entry_times = entries_df["time"].tolist()
+
     # All trade rows
     rows = []
     for idx, (_, r) in enumerate(done.iterrows()):
         sl_v  = r.get("sl");  sl_s  = f"{float(sl_v):.2f}"  if pd.notna(sl_v)  else "—"
         tp_v  = r.get("tp");  tp_s  = f"{float(tp_v):.2f}"  if pd.notna(tp_v)  else "—"
         lot_v = r.get("lot_size"); lot_s = f"{float(lot_v):.4f}" if pd.notna(lot_v) else "—"
+        entry_t = str(entry_times[idx])[:16] if idx < len(entry_times) else "—"
         rows.append({
-            "num":      idx + 1,
-            "time":     str(r["time"])[:16],
-            "symbol":   str(r.get("symbol",   "")),
-            "strategy": str(r.get("strategy", "")),
-            "dir":      "SHORT" if r["type"] == "COVER" else "LONG",
-            "entry":    round(float(r.get("entry_price", 0)), 2),
-            "sl":       sl_s,
-            "target":   tp_s,
-            "exit":     round(float(r.get("exit_price",  0)), 2),
-            "label":    str(r.get("exit_label", r.get("exit_reason", ""))),
-            "lot":      lot_s,
-            "profit":   round(float(r["profit"]), 2),
-            "cap":      round(float(r["capital"]), 2),
+            "num":        idx + 1,
+            "entry_time": entry_t,
+            "time":       str(r["time"])[:16],
+            "symbol":     str(r.get("symbol",   "")),
+            "strategy":   str(r.get("strategy", "")),
+            "dir":        "SHORT" if r["type"] == "COVER" else "LONG",
+            "entry":      round(float(r.get("entry_price", 0)), 2),
+            "sl":         sl_s,
+            "target":     tp_s,
+            "exit":       round(float(r.get("exit_price",  0)), 2),
+            "label":      str(r.get("exit_label", r.get("exit_reason", ""))),
+            "lot":        lot_s,
+            "profit":     round(float(r["profit"]), 2),
+            "cap":        round(float(r["capital"]), 2),
         })
 
     eq_labels = ["Start"] + [str(t)[:16] for t in times]
