@@ -31,7 +31,8 @@
       "Bash(./venv/Scripts/python.exe -c \"from algoTrading.ict_trading_system.strategy.top_down import build_top_down_context, scan_top_down, TimeframeAnalysis, TopDownContext, TradeOpportunity, analyze_timeframe, get_trade_bias, find_trade_opportunities; print\\('top_down imports OK'\\)\")",
       "PowerShell(Get-Command python 2>$null)",
       "Bash(python -c \"import pandas as pd; df = pd.read_csv\\(r'c:\\\\Users\\\\chint\\\\OneDrive\\\\Documents\\\\GitHub\\\\AlgoTrading\\\\src\\\\algoTrading\\\\data\\\\trade_data.csv'\\); done = df[df['type'].isin\\(['SELL','COVER']\\)]; print\\(done[['type','lot_size','profit']].head\\(10\\).to_string\\(\\)\\); print\\('lot_size nulls:', done['lot_size'].isna\\(\\).sum\\(\\), 'of', len\\(done\\)\\)\")",
-      "Bash(python -c \"import pandas as pd; df=pd.read_csv\\('c:/Users/chint/OneDrive/Documents/GitHub/AlgoTrading/src/algoTrading/data/ohlcv_XAUUSD.csv'\\); print\\(df.shape\\); print\\(df.columns.tolist\\(\\)\\); print\\(df.head\\(3\\).to_string\\(\\)\\); print\\(df.tail\\(3\\).to_string\\(\\)\\)\")"
+      "Bash(python -c \"import pandas as pd; df=pd.read_csv\\('c:/Users/chint/OneDrive/Documents/GitHub/AlgoTrading/src/algoTrading/data/ohlcv_XAUUSD.csv'\\); print\\(df.shape\\); print\\(df.columns.tolist\\(\\)\\); print\\(df.head\\(3\\).to_string\\(\\)\\); print\\(df.tail\\(3\\).to_string\\(\\)\\)\")",
+      "Bash(python -c \"import pandas as pd; ts=pd.Timestamp\\('2024-01-15 03:30:00'\\); print\\(ts.tz_localize\\('UTC'\\).tz_convert\\('Asia/Kolkata'\\)\\)\")"
     ]
   }
 }

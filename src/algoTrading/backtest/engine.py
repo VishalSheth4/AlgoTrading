@@ -171,6 +171,18 @@ class BacktestEngine:
             )
 
             # ================================================================
+            # FORCE CLOSE  (force_entry=1 closes any open trade so the new
+            #               session signal can always enter on this bar)
+            # ================================================================
+            if row.get("force_entry", 0) == 1 and signal != 0 and self.position != 0:
+                self._close_position(
+                    exit_price=close,
+                    exit_reason="SESSION",
+                    time=time,
+                    direction=self.position,
+                )
+
+            # ================================================================
             # LONG ENTRY  (signal == +1, flat position, day not blocked)
             # ================================================================
             if signal == 1 and self.position == 0 and not day_blocked:
@@ -209,6 +221,7 @@ class BacktestEngine:
                 self.position = 1
                 self._open_strategy = row.get("_strategy", "")
                 self._sl_exit_on_close = bool(row.get("sl_exit_on_close", 1))
+                self._tp_mode = row.get("_tp_mode", Config.TP_MODE) or Config.TP_MODE
 
                 # Log the entry event.
                 self.trades.append({
@@ -293,6 +306,7 @@ class BacktestEngine:
                 self.position = -1
                 self._open_strategy = row.get("_strategy", "")
                 self._sl_exit_on_close = bool(row.get("sl_exit_on_close", 1))
+                self._tp_mode = row.get("_tp_mode", Config.TP_MODE) or Config.TP_MODE
 
                 # Log the entry event.
                 self.trades.append({

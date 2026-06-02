@@ -45,6 +45,7 @@ from algoTrading.strategies.SimpleICT1H5mFVGStrategy import SimpleICT1H5mFVGStra
 from algoTrading.strategies.RSIBuySellStrategy import RSIBuySellStrategy
 from algoTrading.strategies.RSIEMADoubleCrossStrategy import RSIEMADoubleCrossStrategy
 from algoTrading.strategies.SupertrendTouchSellStrategy import SupertrendTouchSellStrategy
+from algoTrading.strategies.SessionStrategy import SessionStrategy
 
 BASE        = Path(__file__).resolve().parent
 CONFIG_YAML = BASE / "config.yaml"
@@ -81,6 +82,7 @@ STRATEGY_MAP = {
     "RSIBuySellStrategy":              RSIBuySellStrategy,
     "RSIEMADoubleCrossStrategy":       RSIEMADoubleCrossStrategy,
     "SupertrendTouchSell":             SupertrendTouchSellStrategy,
+    "session_strategy":                SessionStrategy,
 }
 
 

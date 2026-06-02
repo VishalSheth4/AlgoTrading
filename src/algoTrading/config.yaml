@@ -6,10 +6,10 @@
 # Change active_preset to one of the names below to switch strategies.
 # You can also add your own preset lines at any time.
 # ─────────────────────────────────────────────────────────────────────
-active_preset: ict_only
+active_preset: session
 
 presets:
-  counter_flip:      "SupertrendCounterFlip_X1" #,ict_simple_1h5m_fvg,SupertrendTouchSell"
+  counter_flip:      "SupertrendCounterFlip_X1,session_strategy" #,ict_simple_1h5m_fvg,SupertrendTouchSell"
   ict_only:          "ict_simple_1h5m_fvg"
   engulfing_only:    "engulfing_consolidation"
   engulfing_reversal_only: "engulfing_reversal"
@@ -17,6 +17,7 @@ presets:
   rsi_buy_sell:      "rsi_buy_sell"
   rsi_ema_cross:     "rsi_ema_double_cross"
   st_touch:          "SupertrendTouchSell"
+  session:           "session_strategy"
   # ── Combos ──────────────────────────────────────────────────────────
   flip_plus_ict:     "SupertrendCounterFlip_X1,ict_simple_1h5m_fvg"
   flip_plus_engulf:  "SupertrendCounterFlip_X1,engulfing_consolidation"
@@ -149,6 +150,38 @@ strategies:
   doji_strategy:
     lot_size: 0.01
     rr: 2.0
+
+  # ── Session-based ────────────────────────────────────────────────
+  session_strategy:
+    lot_size: 0.01
+    risk_per_trade: 1          # 1% risk per trade
+    rr: 1.0                  # reward-to-risk ratio
+
+    # ── Session times ─────────────────────────────────────────────
+    # Comma-separated HH:MM values.  Strategy fires when a candle
+    # OPENS at one of these times (and closes → entry at close).
+    # !! IMPORTANT: set Config.TIMEFRAME = "M5" — always use M5 !!
+    # With M5 data each session time fires ONCE per day on the M5 bar
+    # that opens at that exact HH:MM (e.g. "18:00" fires on 18:00 M5 bar).
+    # All times below are in IST: 18:00=12:30 UTC, 11:30=06:00 UTC, 23:30=18:00 UTC
+    session_times: "18:00,11:30,23:30"
+    session_timezone: "IST"    # IST | NYC | NYT | EST | LN | UTC
+
+    # ── Candle size filter ────────────────────────────────────────
+    # M5 XAUUSD typical candle range: 1–5 pts
+    # Keep at 0 (disabled) unless you want to skip very small candles.
+    # Setting > 5.0 on M5 data = only news-event candles → very few trades!
+    candle_size_min: 0.0       # 0 = disabled (recommended for M5)
+    sl_buffer_pct: 0.001       # SL = candle extreme × (1 ± buffer)
+
+    # ── Supertrend filter ─────────────────────────────────────────
+    supertrend_filter: false   # true = only trade in Supertrend direction
+    st_period: 10
+    st_mult: 3.0
+
+    # ── EMA filter ────────────────────────────────────────────────
+    ema_filter: false          # true = BUY only above EMA | SELL only below EMA
+    ema_period: 200
 
   # ── ICT-based ────────────────────────────────────────────────────
   ict_simple_1h5m_fvg:

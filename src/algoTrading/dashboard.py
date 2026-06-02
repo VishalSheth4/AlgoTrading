@@ -323,37 +323,61 @@ def _find_streak_trades(done: pd.DataFrame, profits: list) -> tuple:
     return _extract(ws, wl), _extract(ls, ll)
 
 
+def _server_up(host="127.0.0.1", port=8765, timeout=0.5) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _start_chart_server() -> None:
+    """Launch chart_server.py in a new terminal window (Windows) or background process (Unix)."""
+    import subprocess, sys, time
+    server_script = Path(__file__).resolve().parent / "chart_server.py"
+    if not server_script.exists():
+        print("[dashboard] chart_server.py not found — open browser manually")
+        return
+    print("[dashboard] starting chart_server.py ...")
+    if sys.platform == "win32":
+        subprocess.Popen(
+            [sys.executable, str(server_script)],
+            creationflags=subprocess.CREATE_NEW_CONSOLE,
+        )
+    else:
+        subprocess.Popen(
+            [sys.executable, str(server_script)],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    # Give it up to 3 s to start
+    for _ in range(30):
+        time.sleep(0.1)
+        if _server_up():
+            return
+    print("[dashboard] server did not start in time — open http://localhost:8765 manually")
+
+
 def build_dashboard():
-    """Write the static React dashboard shell and open the browser.
-    All trade analytics are served live by chart_server.py via /trades.
-    """
+    """Write the dashboard HTML, auto-start chart_server if needed, open browser."""
     base   = Path(__file__).resolve().parent
     html_p = base / "data" / "dashboard.html"
 
-    html = _render()
-    html_p.write_text(html, encoding='utf-8')
+    html_src = _render()
+    html_p.write_text(html_src, encoding='utf-8')
     print(f"[dashboard] written -> {html_p}")
 
-    server_url = "http://localhost:8765/"
-    opened = False
-    try:
-        with socket.create_connection(("127.0.0.1", 8765), timeout=0.5):
-            webbrowser.open(server_url, new=2)
-            print(f"[dashboard] opened  -> {server_url}")
-            opened = True
-    except OSError:
-        pass
+    # Auto-start the server if it isn't already running
+    if not _server_up():
+        _start_chart_server()
 
-    if not opened:
-        try:
-            import os, sys
-            if sys.platform == "win32":
-                os.startfile(str(html_p))
-            else:
-                webbrowser.open(html_p.as_uri(), new=2)
-            print(f"[dashboard] opened  -> {html_p}")
-        except Exception as e:
-            print(f"[dashboard] could not open browser: {e}")
+    server_url = "http://localhost:8765/"
+    if _server_up():
+        webbrowser.open(server_url, new=2)
+        print(f"[dashboard] opened  -> {server_url}")
+    else:
+        print(f"[dashboard] server not reachable — open {server_url} manually after starting chart_server.py")
 
 
 

@@ -1,0 +1,88 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * { box-sizing: border-box; }
+}
+
+@layer components {
+  .card {
+    @apply bg-bg-tertiary border border-border rounded-sm p-4;
+  }
+  .card-hover {
+    @apply hover:bg-bg-elevated transition-colors duration-150;
+  }
+  .badge {
+    @apply inline-flex items-center px-2 py-0.5 rounded-sm text-[10px] font-bold font-mono tracking-wider border;
+  }
+  .badge-long {
+    @apply badge bg-green/10 text-green border-green/30;
+  }
+  .badge-short {
+    @apply badge bg-red/10 text-red border-red/30;
+  }
+  .badge-tp {
+    @apply badge bg-accent/10 text-accent border-accent/30;
+  }
+  .badge-sl {
+    @apply badge bg-red/10 text-red border-red/30;
+  }
+  .badge-rr {
+    @apply badge bg-green/10 text-green border-green/30;
+  }
+  .badge-st {
+    @apply badge bg-purple/10 text-purple border-purple/30;
+  }
+  .badge-session {
+    @apply badge bg-yellow/10 text-yellow border-yellow/30;
+  }
+  .btn {
+    @apply px-3 py-1.5 text-xs font-medium rounded-sm border border-border
+           bg-bg-elevated text-txt-secondary hover:text-txt-primary hover:border-border/80
+           transition-colors duration-150 cursor-pointer select-none;
+  }
+  .btn-primary {
+    @apply btn bg-accent/10 border-accent/30 text-accent hover:bg-accent/20;
+  }
+  .section-label {
+    @apply text-[9px] font-bold tracking-[0.12em] uppercase text-txt-muted font-sans;
+  }
+  .metric-value {
+    @apply text-2xl font-bold font-mono text-txt-primary tabular-nums;
+  }
+  .metric-label {
+    @apply text-[10px] font-medium tracking-[0.1em] uppercase text-txt-secondary font-sans;
+  }
+  .tbl-th {
+    @apply px-3 py-2 text-left text-[9px] font-bold tracking-[0.1em] uppercase
+           text-txt-muted bg-bg-secondary border-b border-border sticky top-0 z-10;
+  }
+  .tbl-td {
+    @apply px-3 py-2 text-[11px] font-mono text-txt-secondary border-b border-border/50;
+  }
+  .win  { @apply text-green; }
+  .loss { @apply text-red; }
+  .neutral { @apply text-txt-secondary; }
+}
+
+/* LightweightCharts tooltip override */
+.tv-lightweight-charts {
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+/* Animated pulse for live indicator */
+@keyframes live-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.4; transform: scale(0.85); }
+}
+.live-dot {
+  animation: live-pulse 2s ease-in-out infinite;
+}
+
+/* Number flash animation */
+@keyframes flash-green { 0%,100%{background:transparent} 30%{background:rgba(63,185,80,.18)} }
+@keyframes flash-red   { 0%,100%{background:transparent} 30%{background:rgba(248,81,73,.18)} }
+.flash-up   { animation: flash-green 0.6s ease; }
+.flash-down { animation: flash-red   0.6s ease; }

@@ -23,7 +23,7 @@ import json
 import sys
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -344,6 +344,35 @@ def _mark_engulfing(ohlcv: list) -> None:
             curr["wickColor"]   = "#ef5350"
 
 
+# ── OHLCV response cache ──────────────────────────────────────────────────────
+# Stores the heavy json bytes (ohlcv+supertrend+markers) keyed by (csv_path, limit).
+# Cache invalidates when the CSV file's mtime changes (e.g. after a new backtest).
+_resp_cache: dict = {}
+
+
+def _ohlcv_cached_bytes(limit: int = 0, symbol: str = "", tf: str = "") -> bytes:
+    """
+    Build or retrieve the /ohlcv JSON bytes from cache.
+    Only the static OHLCV part is cached; the dynamic 'live' status is appended fresh.
+    """
+    csv_p = _active_csv(symbol, tf)
+    mtime = csv_p.stat().st_mtime if csv_p.exists() else 0
+    key   = (str(csv_p), limit)
+
+    entry = _resp_cache.get(key)
+    if entry is None or entry[0] != mtime:
+        ohlcv, supertrend, markers = _load(limit, symbol, tf)
+        base = json.dumps(
+            {"ohlcv": ohlcv, "supertrend": supertrend, "markers": markers}
+        ).encode()
+        _resp_cache[key] = (mtime, base)
+    else:
+        base = entry[1]
+
+    live_bytes = json.dumps(dict(_live)).encode()
+    return base[:-1] + b',"live":' + live_bytes + b'}'
+
+
 # ── Data loader ───────────────────────────────────────────────────────────────
 
 def _available_symbols() -> dict:
@@ -401,22 +430,31 @@ def _load(limit: int = 0, symbol: str = "", tf: str = ""):
     if limit > 0:
         df = df.tail(limit).reset_index(drop=True)
 
-    st_all = _supertrend(df)
-    cutoff = int(df["time"].iloc[0].timestamp())
+    n = len(df)
+
+    # Vectorised conversion — avoids slow iterrows on large (655k+) datasets.
+    times_unix = (df["time"].astype("int64") // 10 ** 9).tolist()
+    opens_v  = df["open"].round(2).tolist()
+    highs_v  = df["high"].round(2).tolist()
+    lows_v   = df["low"].round(2).tolist()
+    closes_v = df["close"].round(2).tolist()
 
     ohlcv = [
-        {
-            "time":  int(row["time"].timestamp()),
-            "open":  round(float(row["open"]),  2),
-            "high":  round(float(row["high"]),  2),
-            "low":   round(float(row["low"]),   2),
-            "close": round(float(row["close"]), 2),
-        }
-        for _, row in df.iterrows()
+        {"time": t, "open": o, "high": h, "low": l, "close": c}
+        for t, o, h, l, c in zip(times_unix, opens_v, highs_v, lows_v, closes_v)
     ]
-    _mark_engulfing(ohlcv)
-    supertrend = [p for p in st_all if p["time"] >= cutoff]
-    markers    = _load_trade_markers(ohlcv)
+
+    # Supertrend + engulfing: only compute for smaller datasets.
+    # The Python loops take ~30 s on 655 k bars and bars are sub-pixel anyway.
+    if n <= 50_000:
+        st_all     = _supertrend(df)
+        cutoff     = int(df["time"].iloc[0].timestamp())
+        supertrend = [p for p in st_all if p["time"] >= cutoff]
+        _mark_engulfing(ohlcv)
+    else:
+        supertrend = []
+
+    markers = _load_trade_markers(ohlcv)
     return ohlcv, supertrend, markers
 
 
@@ -638,26 +676,35 @@ def _compute_trade_analytics() -> dict:
                 "profit_pct": spct,
             })
 
+    # Build entry-time lookup: pair each BUY/SHORT with the next SELL/COVER
+    entries = df[df["type"].isin(["BUY", "SHORT"])].copy()
+    entries["time"] = pd.to_datetime(entries["time"], errors="coerce")
+    entries = entries.sort_values("time").reset_index(drop=True)
+    # Map entry index → entry time (sequential pairing)
+    entry_times = entries["time"].tolist()
+
     # All closed trade rows
     rows = []
     for idx, (_, r) in enumerate(done.iterrows()):
         sl_v  = r.get("sl");  sl_s  = f"{float(sl_v):.2f}"  if pd.notna(sl_v)  else "—"
         tp_v  = r.get("tp");  tp_s  = f"{float(tp_v):.2f}"  if pd.notna(tp_v)  else "—"
         lot_v = r.get("lot_size"); lot_s = f"{float(lot_v):.2f}" if pd.notna(lot_v) else "—"
+        entry_t = str(entry_times[idx])[:16] if idx < len(entry_times) else "—"
         rows.append({
-            "num":      idx + 1,
-            "time":     str(r["time"])[:16],
-            "symbol":   str(r.get("symbol",   "")),
-            "strategy": str(r.get("strategy", "")),
-            "dir":      "SHORT" if r["type"] == "COVER" else "LONG",
-            "entry":    round(float(r.get("entry_price", 0)), 2),
-            "sl":       sl_s,
-            "target":   tp_s,
-            "exit":     round(float(r.get("exit_price",  0)), 2),
-            "label":    str(r.get("exit_label", r.get("exit_reason", ""))),
-            "lot":      lot_s,
-            "profit":   round(float(r["profit"]), 2),
-            "cap":      round(float(r["capital"]), 2),
+            "num":        idx + 1,
+            "entry_time": entry_t,
+            "time":       str(r["time"])[:16],
+            "symbol":     str(r.get("symbol",   "")),
+            "strategy":   str(r.get("strategy", "")),
+            "dir":        "SHORT" if r["type"] == "COVER" else "LONG",
+            "entry":      round(float(r.get("entry_price", 0)), 2),
+            "sl":         sl_s,
+            "target":     tp_s,
+            "exit":       round(float(r.get("exit_price",  0)), 2),
+            "label":      str(r.get("exit_label", r.get("exit_reason", ""))),
+            "lot":        lot_s,
+            "profit":     round(float(r["profit"]), 2),
+            "cap":        round(float(r["capital"]), 2),
         })
 
     eq_labels = ["Start"] + [str(t)[:16] for t in times]
@@ -785,13 +832,14 @@ class Handler(BaseHTTPRequestHandler):
                 tf_req = qs.get("tf",  [""])[0].strip()
                 if limit < 0:
                     limit = 0
-                ohlcv, supertrend, markers = _load(limit, sym, tf_req)
-                self._json(200, {
-                    "ohlcv":      ohlcv,
-                    "supertrend": supertrend,
-                    "markers":    markers,
-                    "live":       dict(_live),
-                })
+                body = _ohlcv_cached_bytes(limit, sym, tf_req)
+                self.send_response(200)
+                self.send_header("Content-Type",   "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control",  "no-cache")
+                self._cors()
+                self.end_headers()
+                self.wfile.write(body)
             except Exception as exc:
                 self._json(500, {"error": str(exc)})
 
@@ -833,7 +881,9 @@ def run(port: int = 8765):
     t.start()
     print(f"[live] Starting feed for {_SYMBOL} {_TIMEFRAME} (poll every {FETCH_INTERVAL}s)")
 
-    server = HTTPServer(("127.0.0.1", port), Handler)
+    # ThreadingHTTPServer handles each request in its own thread so
+    # heavy OHLCV cache builds don't block the health/status endpoints.
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     print(f"chart_server running on http://127.0.0.1:{port}")
     print(f"  Dashboard : http://127.0.0.1:{port}/")
     print(f"  OHLCV API : http://127.0.0.1:{port}/ohlcv?limit=1000")

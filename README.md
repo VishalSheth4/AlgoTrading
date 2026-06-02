@@ -1,99 +1,95 @@
-# AlgoTrading
+# AlgoTrading Pro
 
-A Python algorithmic trading system built on MetaTrader5 (MT5). Supports backtesting across multiple strategies and symbols, live MT5 trading, and an interactive React dashboard served by Django.
+A Python algorithmic trading platform built on MetaTrader5 (MT5).  
+Supports backtesting across multiple strategies, live MT5 trading, and a **real-time React dashboard** served by Django + WebSockets.
+
+---
+
+## Quick Start (Windows)
+
+```
+Double-click  start.bat
+```
+
+Or from a terminal:
+
+```bat
+start.bat
+```
+
+That single file:
+1. Checks Python + Node are installed
+2. Installs all Python packages (`django`, `channels`, `daphne`, `pandas`, …)
+3. Runs `npm install` in `frontend/` on first run
+4. Starts both servers and opens the dashboard
+
+| URL | What |
+|-----|------|
+| **http://localhost:5173** | React dashboard ← open this |
+| http://localhost:8000/api/trades | Trade analytics JSON |
+| http://localhost:8000/api/status | Live feed status |
 
 ---
 
 ## Prerequisites
 
 | Requirement | Notes |
-|---|---|
-| Python 3.10+ | |
-| MetaTrader5 terminal | Windows only — required for live data and trading |
-| MT5 account | Demo or live account logged in inside the terminal |
+|-------------|-------|
+| Python 3.10+ | `python --version` to check |
+| Node.js 18+ | `node --version` to check — [nodejs.org](https://nodejs.org) |
+| MetaTrader5 terminal | Windows only — for live price data |
 
 ---
 
-## 1. Clone & Set Up Virtual Environment
+## Manual Setup (step-by-step)
+
+### 1. Clone
 
 ```bash
 git clone https://github.com/VishalSheth4/AlgoTrading.git
-cd AlgoTrading/src
-
-python -m venv venv
-
-# Windows
-venv\Scripts\activate
-
-# Linux / macOS
-source venv/bin/activate
+cd AlgoTrading
 ```
 
----
-
-## 2. Install Dependencies
+### 2. Python dependencies
 
 ```bash
-pip install --upgrade pip
-
-pip install MetaTrader5 pandas numpy matplotlib
-pip install django djangorestframework django-cors-headers
-pip install gunicorn waitress whitenoise python-dotenv
-pip install requests beautifulsoup4 lxml pyyaml
+pip install django channels daphne djangorestframework django-cors-headers
+pip install pandas numpy pyyaml python-dotenv MetaTrader5
 ```
 
----
+### 3. Node dependencies
 
-## 3. Configure the Project
-
-Edit `src/algoTrading/config.py`:
-
-| Setting | Default | Description |
-|---|---|---|
-| `SYMBOL` | `"XAUUSD"` | Symbol(s) — comma-separated for multi-symbol |
-| `STRATEGY` | `"mark2,..."` | Strategy/strategies — comma-separated |
-| `TIMEFRAME` | `"M15"` | Primary candle timeframe |
-| `INITIAL_CAPITAL` | `100` | Starting capital per symbol (USD) |
-| `RISK_PER_TRADE` | `0.04` | Fraction of capital risked per trade |
-| `TP_MODE` | `"rr"` | `"rr"` / `"st"` / `"both"` / `"fix_profit"` |
-| `RR` | `5` | Risk-reward ratio (used when `TP_MODE = "rr"`) |
-| `START_DATE` | `"2016-01-01"` | Backtest start date |
-| `END_DATE` | `"2026-06-01"` | Backtest end date |
-| `MT5_LOGIN` | *(your login)* | MT5 account number |
-| `MT5_PASSWORD` | *(your password)* | MT5 account password |
-| `MT5_SERVER` | `"ICMarketsSC-Demo"` | MT5 broker server name |
-
-**Multi-symbol / multi-strategy examples:**
-```python
-SYMBOL   = "XAUUSD,EURUSD,GBPUSD"
-STRATEGY = "mark2,mark_dollar_supertrend,engulfing"
+```bash
+cd frontend
+npm install
+cd ..
 ```
 
-Per-strategy lot size overrides live in `src/algoTrading/config.yaml`.
+### 4. Run
+
+```bash
+python run.py
+```
+
+Open **http://localhost:5173**
 
 ---
 
-## 4. Available Strategies
+## Dashboard Features
 
-| Key | Description |
-|---|---|
-| `mark2` | Supertrend flip with counter-trend filter |
-| `mark_dollar_supertrend` | Dollar-weighted Supertrend |
-| `engulfing` | Bullish / bearish engulfing candle |
-| `engulfing_consolidation` | Engulfing within consolidation range |
-| `engulfing_reversal` | Engulfing at key reversal levels |
-| `SupertrendCounterFlip_X1` | Counter-flip on Supertrend change |
-| `EmaCrossoverRetestStrategy` | EMA crossover + retest entry |
-| `Ema200PullbackEngulfingStrategy` | EMA-200 pullback with engulfing |
-| `RSIBuySellStrategy` | RSI overbought/oversold signals |
-| `RSIEMADoubleCrossStrategy` | RSI + EMA dual-cross system |
-| `DojiStrategy` | Doji candle pattern entries |
+| Feature | Detail |
+|---------|--------|
+| **Real-time candlestick chart** | LightweightCharts v4, updates every 1 second |
+| **Live price ticker** | Current price, bid/ask, daily change %, IST clock |
+| **Supertrend overlay** | Toggle on/off directly on the chart |
+| **6 metric cards** | P&L, Win Rate, Max Drawdown, Profit Factor, Avg Win/Loss, Streak |
+| **Equity curve** | Recharts area chart, downsampled for performance |
+| **Trade log** | Paginated table with Symbol / Strategy / Direction filters |
+| **WebSocket feed** | Auto-reconnects, falls back to CSV simulation when MT5 is offline |
 
 ---
 
-## 5. Run a Backtest
-
-Make sure the MetaTrader5 terminal is open and logged in, then run from `src/`:
+## Running a Backtest
 
 ```bash
 cd src
@@ -101,193 +97,131 @@ python -m algoTrading.main_backtest
 ```
 
 What happens:
-1. Fetches fresh OHLCV bars from MT5 for each configured symbol
-2. Concurrently downloads M5, M15, M30, H1, H4 timeframes (15-min cache)
-3. Generates and merges signals from all configured strategies
-4. Runs the backtest engine bar-by-bar with risk-based position sizing
-5. Saves the full trade log → `src/algoTrading/data/trade_data.csv`
-6. Generates the dashboard → `src/algoTrading/data/dashboard.html`
-7. Opens the dashboard in your browser at `http://localhost:8765`
+1. Fetches OHLCV bars from MT5 (or uses cached CSV)
+2. Generates signals from all configured strategies
+3. Runs the event-driven backtest engine
+4. Saves trade log → `src/algoTrading/data/trade_data.csv`
+5. Dashboard auto-refreshes to show new results
 
 ---
 
-## 6. Run the Dashboard Server
+## Configuration
 
-The dashboard is a **Django application** that serves the interactive UI and all API endpoints on a single port. Start it once — no separate processes needed.
+Edit `src/algoTrading/config.py`:
 
-### Development (auto-reload on code changes)
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `SYMBOL` | `"XAUUSD"` | Symbol — comma-separated for multi-symbol |
+| `STRATEGY` | `"session_strategy"` | Strategy key(s) from `config.yaml` |
+| `TIMEFRAME` | `"M5"` | Primary candle timeframe |
+| `INITIAL_CAPITAL` | `100` | Starting capital (USD) |
+| `RISK_PER_TRADE` | `0.01` | Fraction risked per trade |
+| `TP_MODE` | `"rr"` | `"rr"` / `"st"` / `"both"` |
+| `START_DATE` | `"2016-01-01"` | Backtest start |
+| `END_DATE` | `"2026-06-01"` | Backtest end |
 
-```bash
-cd src
-python run.py           # port 8765
-python run.py 9000      # custom port
-```
-
-### Production (Windows — waitress)
-
-```bash
-cd src
-python run_server.py
-```
-
-Or double-click:
-
-```
-src/deploy/windows/start.bat
-```
-
-### Production (Linux — gunicorn)
-
-```bash
-cd src
-python run_server.py
-```
-
-Or use the shell script:
-
-```bash
-chmod +x src/deploy/linux/start.sh
-./src/deploy/linux/start.sh
-```
-
-### Environment Configuration
-
-Copy the example env file and edit it before going public:
-
-```bash
-# From src/
-cp .env.example .env
-```
-
-Key variables in `.env`:
-
-```env
-DJANGO_SECRET_KEY=<generate with python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())">
-ALLOWED_HOSTS=localhost,127.0.0.1,your-server-ip
-PORT=8765
-DJANGO_SETTINGS_MODULE=config.production_settings
-```
+Per-strategy overrides (lot size, RR, filters) live in `src/algoTrading/config.yaml`.
 
 ---
 
-## 7. Auto-Start on Boot
+## Available Strategies
 
-### Linux — systemd service
-
-```bash
-# Edit the paths inside the file first
-sudo cp src/deploy/linux/algotrading.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now algotrading
-
-# View logs
-sudo journalctl -u algotrading -f
-```
-
-### Windows — Windows Service (requires NSSM)
-
-1. Download [NSSM](https://nssm.cc/download) and place `nssm.exe` next to `install_service.bat`
-2. Right-click `src/deploy/windows/install_service.bat` → **Run as administrator**
-3. The service starts automatically on Windows boot
+| Key | Description |
+|-----|-------------|
+| `session_strategy` | Trade candle closes at configurable session times (IST/UTC) |
+| `SupertrendCounterFlip_X1` | Counter-flip on Supertrend direction change |
+| `ict_simple_1h5m_fvg` | ICT fair-value gap with sweep + displacement |
+| `engulfing_consolidation` | Engulfing pattern within consolidation |
+| `engulfing_reversal` | Engulfing at key reversal levels |
+| `supertrend_engulfing_reversal` | Supertrend + engulfing combo |
+| `SupertrendTouchSell` | Supertrend touch-and-reverse |
+| `rsi_buy_sell` | RSI overbought/oversold |
+| `rsi_ema_double_cross` | RSI + EMA dual-cross |
+| `DojiStrategy` | Doji candle entries |
 
 ---
 
-## 8. Dashboard Endpoints
-
-| URL | Description |
-|---|---|
-| `http://localhost:8765/` | Interactive React dashboard |
-| `http://localhost:8765/trades` | Full analytics JSON (metrics, monthly breakdown, trade log) |
-| `http://localhost:8765/ohlcv?limit=0` | OHLCV + Supertrend + trade markers (all bars) |
-| `http://localhost:8765/status` | MT5 live feed status |
-| `http://localhost:8765/healthz` | Health check |
-| `http://localhost:8765/dashboard_hash` | Mtime hash — browser auto-refreshes after each backtest |
-| `http://localhost:8765/admin/` | Django admin panel |
-
----
-
-## 9. Project Structure
+## Project Structure
 
 ```
 AlgoTrading/
-└── src/                          ← Django project root (run everything from here)
-    ├── run.py                    ← Development server (port 8765)
-    ├── run_server.py             ← Production server (waitress/gunicorn, OS-aware)
-    ├── manage.py                 ← Standard Django management utility
-    ├── .env                      ← Your secrets and config (not in git)
-    ├── .env.example              ← Template for .env
-    │
-    ├── config/                   ← Django project config
-    │   ├── settings.py           ← Base settings
-    │   ├── production_settings.py← Production overrides (DEBUG=False, WhiteNoise)
-    │   ├── urls.py               ← Root URL routing
-    │   ├── wsgi.py
-    │   └── asgi.py
-    │
-    ├── trading/                  ← Django app — views, MT5 service, URLs
-    │   ├── views.py              ← All HTTP endpoint handlers
-    │   ├── urls.py               ← URL patterns
-    │   ├── apps.py               ← Starts MT5 live-feed thread on startup
-    │   └── mt5_service.py        ← Shared MT5 state, analytics, OHLCV loading
-    │
-    ├── algoTrading/              ← Core trading package
-    │   ├── config.py             ← Global trading configuration
-    │   ├── config.yaml           ← Per-strategy overrides
-    │   ├── main_backtest.py      ← Backtest entry point
-    │   ├── main.py               ← Live trading entry point
-    │   ├── dashboard.py          ← HTML dashboard generator
-    │   ├── chart_server.py       ← Standalone HTTP server (legacy fallback)
-    │   ├── core/                 ← MT5 connection utilities
-    │   ├── broker/               ← MT5 and paper broker
-    │   ├── data/                 ← Data fetching, loading, CSV files
-    │   │   ├── fetch_mt5.py      ← MT5 fetcher (15-min cache, multi-TF)
-    │   │   └── ohlcv_*.csv       ← Cached OHLCV files per symbol/timeframe
-    │   ├── backtest/             ← Backtest engine and metrics
-    │   └── strategies/           ← All strategy implementations
-    │
-    └── deploy/
-        ├── linux/
-        │   ├── start.sh
-        │   ├── algotrading.service   ← systemd unit file
-        │   └── nginx.conf            ← Optional reverse proxy config
-        └── windows/
-            ├── start.bat
-            └── install_service.bat   ← Windows Service installer (NSSM)
+├── start.bat               ← ONE command: installs everything + starts servers
+├── run.py                  ← starts Django + React together
+│
+├── frontend/               ← React + Vite dashboard
+│   ├── package.json
+│   ├── vite.config.js      ← proxies /api + /ws to Django:8000
+│   └── src/
+│       ├── App.jsx         ← React Router shell
+│       ├── store/          ← Zustand global state
+│       ├── hooks/
+│       │   └── useWebSocket.js    ← auto-reconnecting WS hook
+│       ├── components/
+│       │   ├── CandleChart.jsx    ← real-time M1 candles (LightweightCharts)
+│       │   ├── Header.jsx         ← live price, bid/ask, IST clock
+│       │   ├── MetricsPanel.jsx   ← 6 stat cards
+│       │   ├── TradeLog.jsx       ← filterable, paginated table
+│       │   └── EquityCurve.jsx    ← Recharts equity chart
+│       └── pages/
+│           ├── Dashboard.jsx      ← main view
+│           └── Trades.jsx         ← full trade history
+│
+└── src/                    ← Django backend
+    ├── manage.py
+    ├── config/
+    │   ├── settings.py     ← channels + daphne + rest_framework
+    │   └── asgi.py         ← HTTP + WebSocket routing
+    ├── trading/
+    │   ├── consumers.py    ← PriceConsumer (1s tick) + TradesConsumer
+    │   ├── routing.py      ← ws/price/<symbol>/ + ws/trades/
+    │   ├── views.py        ← /api/ohlcv, /api/trades, /api/status
+    │   └── mt5_service.py  ← MT5 live feed + analytics
+    └── algoTrading/        ← core backtest engine + strategies
+        ├── config.py
+        ├── config.yaml
+        ├── main_backtest.py
+        ├── backtest/engine.py
+        └── strategies/
 ```
 
 ---
 
-## 10. Nginx Reverse Proxy (Optional — Linux)
+## WebSocket API
 
-Put nginx in front for SSL, compression, and caching:
+| Endpoint | Description |
+|----------|-------------|
+| `ws://localhost:8000/ws/price/XAUUSD/` | On connect: 600 historical bars + supertrend + markers. Then every **1 second**: `{price, bid, ask, change, bar}` |
+| `ws://localhost:8000/ws/trades/` | On connect: full trade analytics. Pushes update whenever `trade_data.csv` changes |
 
-```bash
-sudo apt install nginx certbot python3-certbot-nginx
+---
 
-# Edit YOUR_DOMAIN in the config first
-sudo cp src/deploy/linux/nginx.conf /etc/nginx/sites-available/algotrading
-sudo ln -s /etc/nginx/sites-available/algotrading /etc/nginx/sites-enabled/
-sudo nginx -t && sudo systemctl reload nginx
+## REST API
 
-# Free SSL certificate
-sudo certbot --nginx -d YOUR_DOMAIN
-```
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/ohlcv?limit=500` | OHLCV bars + supertrend + markers |
+| `GET /api/trades` | Full trade analytics (metrics, monthly, equity curve) |
+| `GET /api/status` | MT5 live feed status |
+| `GET /api/symbols` | Available OHLCV symbols |
 
 ---
 
 ## Troubleshooting
 
-**`ModuleNotFoundError: No module named 'algoTrading'`**
-Run all commands from the `src/` directory.
+**`ModuleNotFoundError: No module named 'channels'`**
+```
+pip install channels daphne
+```
 
-**`MT5 not running` or connection failure**
-Open MetaTrader5 terminal and log into your account before running any script.
+**MT5 not connected**
+Open MetaTrader5 terminal and log in. If MT5 is unavailable, the chart simulates prices from the last saved CSV data.
 
-**`Symbol 'XAUUSD' not found in MT5`**
-In MT5 → Market Watch → right-click → add the symbol. Or change `SYMBOL` in `config.py`.
+**Port already in use**
+Kill existing processes:
+```bat
+netstat -ano | findstr :8000
+taskkill /PID <pid> /F
+```
 
-**Dashboard shows "Server Offline"**
-Start the server first: `cd src && python run.py`
-
-**MT5 not available on Linux**
-MetaTrader5 is Windows-only. On Linux, the live feed is disabled and the dashboard uses the last saved historical data (`sample_data.csv`). Backtesting still works if you copy CSV data manually.
+**Node not found**
+Install from [nodejs.org](https://nodejs.org) — LTS version, then re-run `start.bat`.

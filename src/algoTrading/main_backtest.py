@@ -95,6 +95,7 @@ from algoTrading.strategies.rsi_buy_sell_strategy import RSIBuySellStrategy
 from algoTrading.strategies.RSIEMADoubleCrossStrategy import RSIEMADoubleCrossStrategy
 from algoTrading.strategies.SimpleICT1H5mFVGStrategy import SimpleICT1H5mFVGStrategy
 from algoTrading.strategies.SupertrendTouchSellStrategy import SupertrendTouchSellStrategy
+from algoTrading.strategies.SessionStrategy import SessionStrategy
 # Absolute path to the package root (directory that contains main.py).
 BASE = Path(__file__).resolve().parent
 CONFIG_YAML = BASE / "config.yaml"
@@ -146,6 +147,7 @@ STRATEGY_MAP = {
     "RSIEMADoubleCrossStrategy":    RSIEMADoubleCrossStrategy,
     "ict_simple_1h5m_fvg":          SimpleICT1H5mFVGStrategy,
     "SupertrendTouchSell":          SupertrendTouchSellStrategy,
+    "session_strategy":             SessionStrategy,
 }
 
 
@@ -176,7 +178,7 @@ def purge_csv_cache() -> None:
     csv_files = list(data_dir.glob("*.csv"))
 
     if not csv_files:
-        print("  🗑️  No CSV files to purge — data/ is already clean.")
+        print("  [purge]  No CSV files to purge — data/ is already clean.")
         return
 
     deleted = []
@@ -188,14 +190,14 @@ def purge_csv_cache() -> None:
         except OSError as exc:
             failed.append((f.name, str(exc)))
 
-    print(f"  🗑️  Purged {len(deleted)} CSV file(s) from data/:")
+    print(f"  [purge]  Purged {len(deleted)} CSV file(s) from data/:")
     for name in deleted:
-        print(f"       — {name}")
+        print(f"       - {name}")
 
     if failed:
-        print(f"  ⚠️  Could not delete {len(failed)} file(s):")
+        print(f"  [warn]  Could not delete {len(failed)} file(s):")
         for name, err in failed:
-            print(f"       — {name}: {err}")
+            print(f"       - {name}: {err}")
     
     calendar_file = data_dir / "fx_calendar.csv"
     if calendar_file.exists():
@@ -336,7 +338,9 @@ def _merge_signals(
     merged["risk_per_trade"] = np.nan
     merged["sl_exit_on_close"] = 1
     merged["reverse_exit"] = 0
+    merged["force_entry"]  = 0
     merged["_strategy"]    = ""
+    merged["_tp_mode"]     = ""
 
     for sig_df, name in zip(sig_dfs, strategy_names):
         # Only touch bars not yet claimed by a higher-priority strategy.
@@ -360,6 +364,15 @@ def _merge_signals(
         if "reverse_exit" in sig_df.columns:
             rev_mask = mask & (sig_df["reverse_exit"] == 1)
             merged.loc[rev_mask, "reverse_exit"] = 1
+
+        # Copy force_entry flag (session strategy: close prior trade and re-enter).
+        if "force_entry" in sig_df.columns:
+            fe_mask = mask & (sig_df["force_entry"] == 1)
+            merged.loc[fe_mask, "force_entry"] = 1
+
+        # Copy per-strategy tp_mode so the engine labels exits correctly.
+        if "_tp_mode" in sig_df.columns:
+            merged.loc[mask, "_tp_mode"] = sig_df.loc[mask, "_tp_mode"]
 
     return merged
 
