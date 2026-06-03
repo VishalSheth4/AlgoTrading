@@ -73,25 +73,58 @@ def serve_lib(name: str) -> bytes | None:
         return None
 
 
-FETCH_INTERVAL = 15
+FETCH_INTERVAL = 5   # bar refresh every 5 s when MT5 is live
 
 # ── Live feed state ────────────────────────────────────────────────────────────
 _live: dict = {
-    "active":      False,
-    "symbol":      None,
-    "timeframe":   None,
-    "last_update": None,
-    "error":       None,
+    "active":       False,
+    "symbol":       None,
+    "timeframe":    None,
+    "last_update":  None,
+    "error":        None,
+    "price":        None,   # latest mid-price from MT5 tick
+    "bid":          None,
+    "ask":          None,
+    "market_open":  False,
 }
 _feed_started = False
 _feed_lock    = threading.Lock()
+
+
+def _mt5_connect():
+    """
+    Initialize MT5 using credentials from Config.
+    Returns True on success, False on failure.
+    """
+    try:
+        import MetaTrader5 as mt5
+        # Try with credentials first (works even when terminal is not logged in)
+        try:
+            from algoTrading.config import Config
+            login    = int(Config.MT5_LOGIN)    if Config.MT5_LOGIN    else None
+            password = str(Config.MT5_PASSWORD) if Config.MT5_PASSWORD else None
+            server   = str(Config.MT5_SERVER)   if Config.MT5_SERVER   else None
+
+            if login and password and server:
+                ok = mt5.initialize(login=login, password=password, server=server)
+            else:
+                ok = mt5.initialize()
+        except Exception:
+            ok = mt5.initialize()
+
+        if not ok:
+            print(f"[mt5] initialize failed: {mt5.last_error()}")
+        return ok
+    except Exception as exc:
+        print(f"[mt5] connect error: {exc}")
+        return False
 
 
 def _mt5_live_feed():
     try:
         import MetaTrader5 as mt5
     except ImportError:
-        _live["error"] = "MetaTrader5 not installed — using sample_data.csv"
+        _live["error"] = "MetaTrader5 package not installed"
         print(f"[live] {_live['error']}")
         return
 
@@ -111,30 +144,38 @@ def _mt5_live_feed():
 
     while True:
         try:
-            if not mt5.initialize():
+            if not _mt5_connect():
                 _live["active"] = False
-                _live["error"]  = f"MT5 not running ({mt5.last_error()})"
+                _live["error"]  = f"MT5 login failed — open MetaTrader5 terminal"
                 time.sleep(FETCH_INTERVAL)
                 continue
 
+            # ── Ensure symbol is visible ─────────────────────────────────────
             info = mt5.symbol_info(_SYMBOL)
             if info is None:
                 _live["active"] = False
-                _live["error"]  = f"Symbol '{_SYMBOL}' not found"
+                _live["error"]  = f"Symbol '{_SYMBOL}' not found in MT5"
                 mt5.shutdown()
                 time.sleep(FETCH_INTERVAL)
                 continue
-
             if not info.visible:
                 mt5.symbol_select(_SYMBOL, True)
 
+            # ── Get latest tick price ────────────────────────────────────────
             tick = mt5.symbol_info_tick(_SYMBOL)
-            market_open = tick is not None and (time.time() - tick.time) < 600
+            if tick and tick.bid > 0:
+                _live["price"]       = round((tick.bid + tick.ask) / 2, 2)
+                _live["bid"]         = round(tick.bid, 2)
+                _live["ask"]         = round(tick.ask, 2)
+                _live["market_open"] = (time.time() - tick.time) < 600
+            else:
+                _live["market_open"] = False
 
+            # ── Fetch latest OHLCV bars and save to live_data.csv ────────────
             rates = mt5.copy_rates_from_pos(_SYMBOL, tf, 0, _BARS)
             if rates is None or len(rates) == 0:
                 _live["active"] = False
-                _live["error"]  = "No data from MT5"
+                _live["error"]  = "MT5 returned no bars"
                 mt5.shutdown()
                 time.sleep(FETCH_INTERVAL)
                 continue
@@ -146,15 +187,20 @@ def _mt5_live_feed():
             _live["active"]      = True
             _live["error"]       = None
             _live["last_update"] = time.strftime("%H:%M:%S")
-            _live["market_open"] = market_open
 
-            status = "MARKET OPEN" if market_open else "market closed"
-            print(f"[live] {_SYMBOL} {_TIMEFRAME} — {len(df)} bars — {status}")
+            status = "OPEN" if _live["market_open"] else "CLOSED"
+            print(f"[mt5] {_SYMBOL} {_TIMEFRAME} | {len(df)} bars | "
+                  f"price={_live['price']} | market {status}")
             mt5.shutdown()
 
         except Exception as exc:
             _live["active"] = False
             _live["error"]  = str(exc)
+            print(f"[mt5] feed error: {exc}")
+            try:
+                mt5.shutdown()
+            except Exception:
+                pass
 
         time.sleep(FETCH_INTERVAL)
 

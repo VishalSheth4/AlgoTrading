@@ -6,10 +6,10 @@
 # Change active_preset to one of the names below to switch strategies.
 # You can also add your own preset lines at any time.
 # ─────────────────────────────────────────────────────────────────────
-active_preset: session
+active_preset: counter_flip
 
 presets:
-  counter_flip:      "SupertrendCounterFlip_X1,session_strategy" #,ict_simple_1h5m_fvg,SupertrendTouchSell"
+  counter_flip:      "SupertrendCounterFlip_X1" #,ict_simple_1h5m_fvg,SupertrendTouchSell"
   ict_only:          "ict_simple_1h5m_fvg"
   engulfing_only:    "engulfing_consolidation"
   engulfing_reversal_only: "engulfing_reversal"
@@ -155,7 +155,7 @@ strategies:
   session_strategy:
     lot_size: 0.01
     risk_per_trade: 1          # 1% risk per trade
-    rr: 1.0                  # reward-to-risk ratio
+    rr: 3.0                  # reward-to-risk ratio
 
     # ── Session times ─────────────────────────────────────────────
     # Comma-separated HH:MM values.  Strategy fires when a candle

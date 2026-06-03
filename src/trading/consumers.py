@@ -1,19 +1,20 @@
 """
-WebSocket consumers for real-time price streaming and trade updates.
+WebSocket consumers — MT5 data only.
 
-PriceConsumer  — ws/price/<symbol>/
-  On connect : sends full OHLCV history + supertrend + markers
-  Every 1 s  : sends live tick (price, bid, ask, daily change, forming bar)
+PriceConsumer  ws/price/<symbol>/
+  ├─ On connect : full OHLCV history (from live_data.csv if MT5 active, else sample_data.csv)
+  │               + supertrend overlay + trade markers
+  └─ Every 1 s  : MT5 tick → {price, bid, ask, change, bar}
+                  If MT5 is offline, sends last known price with source="OFFLINE"
 
-TradesConsumer — ws/trades/
-  On connect : sends full trade analytics
-  Polls every 3 s: re-sends if trade_data.csv mtime changed
+TradesConsumer  ws/trades/
+  ├─ On connect : full trade analytics from trade_data.csv
+  └─ Polls every 3 s : re-sends when trade_data.csv changes
 """
 
 import json
 import asyncio
 import time
-import random
 import sys
 from pathlib import Path
 
@@ -24,7 +25,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 
-# ── Helpers (sync, run in thread pool) ────────────────────────────────────────
+# ── Sync helpers (run in thread pool via asyncio.to_thread) ───────────────────
 
 def _get_ohlcv_snapshot(limit: int = 600) -> dict:
     from trading.mt5_service import load_ohlcv
@@ -35,28 +36,44 @@ def _get_ohlcv_snapshot(limit: int = 600) -> dict:
         return {"bars": [], "supertrend": [], "markers": [], "error": str(exc)}
 
 
-def _get_last_close() -> float:
-    from trading.mt5_service import active_csv
-    import pandas as pd
-    try:
-        df = pd.read_csv(active_csv(), usecols=["close"])
-        return float(df["close"].iloc[-1])
-    except Exception:
-        return 2000.0
-
-
-def _try_mt5_tick(symbol: str) -> float | None:
-    """Return mid-price from live MT5, or None if unavailable."""
+def _get_mt5_tick(symbol: str) -> dict | None:
+    """
+    Return live MT5 tick data as a dict, or None if MT5 is unavailable.
+    Uses credentials from Config if the terminal needs login.
+    """
     try:
         import MetaTrader5 as mt5
-        if mt5.initialize():
-            tick = mt5.symbol_info_tick(symbol)
-            mt5.shutdown()
-            if tick and tick.bid > 0:
-                return round((tick.bid + tick.ask) / 2, 2)
-    except Exception:
-        pass
-    return None
+        from trading.mt5_service import _mt5_connect
+        if not _mt5_connect():
+            return None
+
+        tick = mt5.symbol_info_tick(symbol)
+        mt5.shutdown()
+
+        if tick is None or tick.bid <= 0:
+            return None
+
+        return {
+            "bid":   round(tick.bid, 2),
+            "ask":   round(tick.ask, 2),
+            "price": round((tick.bid + tick.ask) / 2, 2),
+            "time":  tick.time,   # unix seconds from MT5
+        }
+    except Exception as exc:
+        print(f"[tick] {symbol} error: {exc}")
+        return None
+
+
+def _get_csv_last_price() -> float | None:
+    """Last close from the active OHLCV CSV (live_data.csv or sample_data.csv)."""
+    try:
+        from trading.mt5_service import active_csv
+        import pandas as pd
+        df = pd.read_csv(active_csv(), usecols=["close"])
+        return round(float(df["close"].iloc[-1]), 2)
+    except Exception as exc:
+        print(f"[price] CSV read failed: {exc}")
+        return None
 
 
 def _get_analytics() -> dict:
@@ -69,21 +86,39 @@ def _get_analytics() -> dict:
 class PriceConsumer(AsyncWebsocketConsumer):
 
     async def connect(self):
-        self.symbol  = self.scope["url_route"]["kwargs"]["symbol"]
+        self.symbol   = self.scope["url_route"]["kwargs"]["symbol"]
         self._running = False
         await self.accept()
 
-        # 1. Send historical bars
+        # ── 1. Send full OHLCV history ────────────────────────────────────────
         snap = await asyncio.to_thread(_get_ohlcv_snapshot, 600)
         await self.send(json.dumps({"type": "history", **snap}))
 
-        # 2. Bootstrap live-price state
-        self._price      = await asyncio.to_thread(_get_last_close)
-        self._day_open   = self._price
-        self._bar_open   = self._price
-        self._bar_high   = self._price
-        self._bar_low    = self._price
-        self._bar_ts     = (int(time.time()) // 60) * 60  # minute boundary
+        # ── 2. Get initial price from MT5 or CSV (no simulation) ─────────────
+        tick = await asyncio.to_thread(_get_mt5_tick, self.symbol)
+        if tick:
+            self._price    = tick["price"]
+            self._day_open = tick["price"]
+            src = "MT5"
+        else:
+            csv_price = await asyncio.to_thread(_get_csv_last_price)
+            self._price    = csv_price or 0.0
+            self._day_open = self._price
+            src = "CSV" if csv_price else "OFFLINE"
+
+        # Bar tracking
+        self._bar_open = self._price
+        self._bar_high = self._price
+        self._bar_low  = self._price
+        self._bar_ts   = (int(time.time()) // 60) * 60
+
+        # Tell frontend the initial price + source
+        await self.send(json.dumps({
+            "type":   "price_source",
+            "source": src,
+            "price":  self._price,
+            "symbol": self.symbol,
+        }))
 
         self._running = True
         asyncio.ensure_future(self._stream())
@@ -92,42 +127,48 @@ class PriceConsumer(AsyncWebsocketConsumer):
         self._running = False
 
     async def _stream(self):
-        SPREAD = 0.40          # XAUUSD typical bid-ask spread
-        SIGMA  = 0.25          # random walk std-dev per second
-
         while self._running:
-            # Try real MT5, fall back to Brownian motion simulation
-            live = await asyncio.to_thread(_try_mt5_tick, self.symbol)
-            if live is not None:
-                price = live
+            tick = await asyncio.to_thread(_get_mt5_tick, self.symbol)
+
+            if tick:
+                price  = tick["price"]
+                bid    = tick["bid"]
+                ask    = tick["ask"]
+                source = "MT5"
             else:
-                price = round(max(1.0, self._price + random.gauss(0, SIGMA)), 2)
+                # MT5 offline — hold last known price, mark OFFLINE, do NOT simulate
+                price  = self._price
+                bid    = round(price - 0.20, 2) if price else 0.0
+                ask    = round(price + 0.20, 2) if price else 0.0
+                source = "OFFLINE"
 
-            now     = int(time.time())
-            bar_ts  = (now // 60) * 60
+            now    = int(time.time())
+            bar_ts = (now // 60) * 60
 
-            if bar_ts > self._bar_ts:          # new minute → close old bar, open new
+            if bar_ts > self._bar_ts:
                 self._bar_ts   = bar_ts
                 self._bar_open = price
                 self._bar_high = price
                 self._bar_low  = price
             else:
-                self._bar_high = max(self._bar_high, price)
-                self._bar_low  = min(self._bar_low,  price)
+                if price > 0:
+                    self._bar_high = max(self._bar_high, price)
+                    self._bar_low  = min(self._bar_low,  price)
 
             self._price = price
 
-            change     = round(price - self._day_open, 2)
+            change     = round(price - self._day_open, 2) if self._day_open else 0.0
             change_pct = round(change / self._day_open * 100, 3) if self._day_open else 0.0
 
             payload = {
                 "type":       "tick",
                 "price":      price,
-                "bid":        round(price - SPREAD / 2, 2),
-                "ask":        round(price + SPREAD / 2, 2),
+                "bid":        bid,
+                "ask":        ask,
                 "change":     change,
                 "change_pct": change_pct,
                 "time":       now,
+                "source":     source,
                 "bar": {
                     "time":  self._bar_ts,
                     "open":  round(self._bar_open, 2),

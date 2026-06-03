@@ -18,3 +18,11 @@ venv/
 # IDE
 .idea/
 .vscode/
+
+# Data files — large OHLCV CSVs and cache metadata
+*.csv
+*.meta
+
+# Node
+node_modules/
+frontend/dist/

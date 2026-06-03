@@ -10,6 +10,7 @@ urlpatterns = [
     path("api/trades",        views.api_trades,           name="api_trades"),
     path("api/status",        views.api_status,           name="api_status"),
     path("api/symbols",       views.api_symbols,          name="api_symbols"),
+    path("api/run-backtest",  views.api_run_backtest,     name="api_run_backtest"),
 
     # Legacy endpoints (kept for backward compat)
     path("ohlcv",             views.ohlcv_view,           name="ohlcv"),

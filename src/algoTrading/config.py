@@ -27,8 +27,8 @@ def _resolve_strategy() -> str:
 
 class Config:
     TIMEFRAME = "M5"
-    INITIAL_CAPITAL = 100
-    RISK_PER_TRADE = 0.2
+    INITIAL_CAPITAL = 1000
+    RISK_PER_TRADE = 0.1
     # Resolved from config.yaml active_preset at import time.
     # Change active_preset in config.yaml instead of editing this line.
     STRATEGY = _resolve_strategy()
@@ -44,8 +44,8 @@ class Config:
 
     # Backtest date range — set both to filter bars, or None to use all data.
     # Format: "YYYY-MM-DD"
-    START_DATE = "2020-01-01"       # earliest IC Markets M5 bar
-    END_DATE   = "2026-06-01"       # up to latest available bar
+    START_DATE = "2026-01-01"       # earliest IC Markets M5 bar
+    END_DATE   = "2026-06-03"       # up to latest available bar
 
     # -------------------------------------------------------
     # TP Settings  (fallback — each strategy overrides via config.yaml)
@@ -53,11 +53,11 @@ class Config:
     # RISK_PER_TRADE = 0.02   # decimal fallback (8%) — overridden per strategy in config.yaml
 
     RR         = 4
-    TP_MODE    = "st"   # "rr" | "st" | "both" | "fix_profit"
+    TP_MODE    = "rr"   # "rr" | "st" | "both" | "fix_profit"
     FIX_PROFIT = 5
 
     MIN_TREND_CANDLES = 1
-    MAX_CANDLE_SIZE   = 0
+    MAX_CANDLE_SIZE   = 10
     MAX_DAILY_LOSSES  = 5
 
     RSI_PERIOD     = 14

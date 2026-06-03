@@ -21,6 +21,8 @@ export default function Header() {
     return () => clearInterval(id)
   }, [])
 
+  const [priceSource, setPriceSource] = useState('—')
+
   // Price WebSocket
   useWebSocket(
     `ws://localhost:8000/ws/price/${symbol}/`,
@@ -33,6 +35,10 @@ export default function Header() {
           setFlash(msg.change >= 0 ? 'up' : 'down')
           setTimeout(() => setFlash(null), 600)
           setTick(msg)
+          if (msg.source) setPriceSource(msg.source)
+        }
+        if (msg.type === 'price_source') {
+          setPriceSource(msg.source)
         }
       },
     }
@@ -86,6 +92,21 @@ export default function Header() {
         <Clock size={11} />
         {clock}
       </div>
+
+      {/* Price source badge */}
+      {connected && (
+        <div className={clsx(
+          'px-2 py-0.5 rounded-sm text-[9px] font-bold font-mono border tracking-wider',
+          priceSource === 'MT5'     ? 'text-green  border-green/30  bg-green/10'  :
+          priceSource === 'OFFLINE' ? 'text-red    border-red/30    bg-red/10'    :
+          priceSource === 'CSV'     ? 'text-yellow border-yellow/30 bg-yellow/10' :
+                                      'text-txt-muted border-border'
+        )}>
+          {priceSource === 'MT5'     ? '● MT5 LIVE'  :
+           priceSource === 'OFFLINE' ? '✕ MT5 OFFLINE' :
+           priceSource === 'CSV'     ? '◎ CSV PRICE'  : priceSource}
+        </div>
+      )}
 
       {/* WS Status */}
       <div className={clsx(

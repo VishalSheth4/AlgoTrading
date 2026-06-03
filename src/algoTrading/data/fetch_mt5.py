@@ -5,6 +5,30 @@ import pandas as pd
 from datetime import datetime
 from pathlib import Path
 
+
+def _ensure_connected() -> bool:
+    """
+    Make sure MT5 is initialized with credentials from Config.
+    Safe to call even if already connected — MT5 ignores duplicate inits.
+    """
+    try:
+        from algoTrading.config import Config
+        login    = int(Config.MT5_LOGIN)    if getattr(Config, "MT5_LOGIN",    None) else None
+        password = str(Config.MT5_PASSWORD) if getattr(Config, "MT5_PASSWORD", None) else None
+        server   = str(Config.MT5_SERVER)   if getattr(Config, "MT5_SERVER",   None) else None
+
+        if login and password and server:
+            ok = mt5.initialize(login=login, password=password, server=server)
+        else:
+            ok = mt5.initialize()
+
+        if not ok:
+            print(f"  [mt5] init failed: {mt5.last_error()}")
+        return ok
+    except Exception as exc:
+        print(f"  [mt5] _ensure_connected error: {exc}")
+        return False
+
 TIMEFRAME_MAP = {
     "M1":  mt5.TIMEFRAME_M1,
     "M5":  mt5.TIMEFRAME_M5,
@@ -59,6 +83,12 @@ def fetch_and_store(symbol, timeframe, bars, save_path, from_date: datetime | No
         remaining = int((CACHE_TTL - (time.time() - meta["cached_at"])) / 60)
         print(f"✅ Cache hit — {symbol} {timeframe} | cached {age_min}m ago | refreshes in ~{remaining}m")
         return
+
+    # Ensure MT5 is connected before any API calls
+    if not _ensure_connected():
+        raise RuntimeError(
+            "MT5 not connected. Open MetaTrader5 terminal and log in, then retry."
+        )
 
     tf = TIMEFRAME_MAP.get(timeframe)
     if tf is None:

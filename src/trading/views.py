@@ -105,6 +105,47 @@ def api_status(request):
     }))
 
 
+@csrf_exempt
+def api_run_backtest(request):
+    """
+    POST /api/run-backtest
+    Runs the full backtest pipeline in a background thread.
+    Returns immediately with {"status": "started"}.
+    GET  /api/run-backtest  → returns current run status.
+    """
+    import threading
+    import time as _time
+
+    global _backtest_status
+    if request.method == "GET":
+        return _cors(JsonResponse(_backtest_status))
+
+    if _backtest_status.get("running"):
+        return _cors(JsonResponse({"status": "already_running", **_backtest_status}))
+
+    def _run():
+        global _backtest_status
+        _backtest_status = {"running": True, "status": "running", "started": _time.strftime("%H:%M:%S"), "error": None}
+        try:
+            import sys
+            from pathlib import Path
+            _src = Path(__file__).resolve().parents[1]
+            if str(_src) not in sys.path:
+                sys.path.insert(0, str(_src))
+            from algoTrading.main_backtest import main
+            main()
+            _backtest_status = {"running": False, "status": "done", "finished": _time.strftime("%H:%M:%S"), "error": None}
+        except Exception as exc:
+            _backtest_status = {"running": False, "status": "error", "error": str(exc)}
+
+    _backtest_status = {"running": True, "status": "starting"}
+    threading.Thread(target=_run, daemon=True, name="backtest").start()
+    return _cors(JsonResponse({"status": "started"}))
+
+
+_backtest_status: dict = {"running": False, "status": "idle"}
+
+
 @require_GET
 def api_symbols(request):
     """GET /api/symbols — available OHLCV CSV symbols"""
