@@ -1,13 +1,38 @@
+import { useState, useEffect } from 'react'
 import { NavLink } from 'react-router-dom'
-import { LayoutDashboard, LineChart, ListOrdered, Settings } from 'lucide-react'
+import { LayoutDashboard, LineChart, ListOrdered, Settings, IndianRupee, Bell } from 'lucide-react'
 import clsx from 'clsx'
 
-const NAV = [
-  { to: '/',       icon: LayoutDashboard, label: 'Dashboard' },
-  { to: '/trades', icon: ListOrdered,     label: 'Trades'    },
+const BASE_NAV = [
+  { to: '/',        icon: LayoutDashboard, label: 'Dashboard' },
+  { to: '/trades',  icon: ListOrdered,     label: 'Trades'    },
+  { to: '/alerts',  icon: Bell,            label: 'Alerts'    },
 ]
 
 export default function Sidebar() {
+  const [nseEnabled, setNseEnabled] = useState(false)
+
+  useEffect(() => {
+    fetch('/api/nse/config')
+      .then(r => r.json())
+      .then(d => { if (d.ok) setNseEnabled(!!d.config?.enabled) })
+      .catch(() => {})
+
+    // Re-check every 5s in case user toggles in UI
+    const id = setInterval(() => {
+      fetch('/api/nse/config')
+        .then(r => r.json())
+        .then(d => { if (d.ok) setNseEnabled(!!d.config?.enabled) })
+        .catch(() => {})
+    }, 5000)
+    return () => clearInterval(id)
+  }, [])
+
+  const NAV = [
+    ...BASE_NAV,
+    ...(nseEnabled ? [{ to: '/nse', icon: IndianRupee, label: 'NSE / BSE' }] : []),
+  ]
+
   return (
     <aside className="w-14 flex flex-col items-center py-3 gap-1 border-r border-border bg-bg-secondary shrink-0">
       {/* Logo */}

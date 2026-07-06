@@ -26,14 +26,14 @@ def _resolve_strategy() -> str:
 
 
 class Config:
-    TIMEFRAME = "M5"
+    TIMEFRAME = "H1"
     INITIAL_CAPITAL = 1000
-    RISK_PER_TRADE = 0.1
+    RISK_PER_TRADE = 0.3
     # Resolved from config.yaml active_preset at import time.
     # Change active_preset in config.yaml instead of editing this line.
     STRATEGY = _resolve_strategy()
-    SYMBOL = "XAUUSD"           # comma-separated for multi-symbol: "XAUUSD,EURUSD,GBPUSD,AUDUSD"
-    # SYMBOL = "XAUUSD,EURUSD,GBPUSD,USDJPY,XAGUSD"
+    # SYMBOL = "XAUUSD"           # comma-separated for multi-symbol: "XAUUSD,EURUSD,GBPUSD,AUDUSD"
+    SYMBOL = "XAUUSD,EURUSD,GBPUSD,USDJPY,XAGUSD"
     LOT_SIZE = 0.01
     MODE = "mt5"   # "mt5" → fetch live from MetaTrader5 | "csv" → use local CSV (Kaggle)
 
@@ -45,15 +45,15 @@ class Config:
     # Backtest date range — set both to filter bars, or None to use all data.
     # Format: "YYYY-MM-DD"
     START_DATE = "2026-01-01"       # earliest IC Markets M5 bar
-    END_DATE   = "2026-06-03"       # up to latest available bar
+    END_DATE   = "2026-06-15"       # up to latest available bar
 
     # -------------------------------------------------------
     # TP Settings  (fallback — each strategy overrides via config.yaml)
     # -------------------------------------------------------
     # RISK_PER_TRADE = 0.02   # decimal fallback (8%) — overridden per strategy in config.yaml
 
-    RR         = 4
-    TP_MODE    = "rr"   # "rr" | "st" | "both" | "fix_profit"
+    RR         = 2.5
+    TP_MODE    = "st"   # "rr" | "st" | "both" | "fix_profit"
     FIX_PROFIT = 5
 
     MIN_TREND_CANDLES = 1

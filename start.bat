@@ -29,7 +29,7 @@ echo.
 echo [setup] Installing Python packages...
 pip install --quiet --upgrade pip
 pip install --quiet django channels daphne djangorestframework django-cors-headers ^
-    pandas numpy pyyaml python-dotenv MetaTrader5
+    pandas numpy pyyaml python-dotenv MetaTrader5 yfinance requests
 echo [ok] Python packages ready
 
 :: ── Install Node packages ──────────────────────────────────────────────────────
@@ -62,14 +62,22 @@ cd ..
 
 :: ── Start servers ─────────────────────────────────────────────────────────────
 echo.
-echo  -----------------------------------------
+echo  =========================================
 echo   Step 2: Starting Servers
-echo   Backend   http://localhost:8000
-echo   Frontend  http://localhost:5173
+echo  =========================================
+echo   Backend (Django)   http://localhost:8000
+echo   Frontend (React)   http://localhost:5173
 echo  -----------------------------------------
 echo   Open http://localhost:5173 in browser
-echo   Press Ctrl+C to stop
 echo  -----------------------------------------
+echo   LIVE BOT:
+echo     - Go to Dashboard  ^> Live Bot panel
+echo     - Click "Start Bot" to begin live trading
+echo     - Or set auto_start_live_bot: true in config.yaml
+echo     - Bot logs: src\algoTrading\data\live_trading.log
+echo  -----------------------------------------
+echo   Press Ctrl+C to stop all servers
+echo  =========================================
 echo.
 python run.py
 

@@ -30,7 +30,9 @@ TRADE_CSV      = BASE / "data" / "trade_data.csv"
 # ── Config (safe defaults if algoTrading not yet importable) ───────────────────
 try:
     from algoTrading.config import Config
-    _SYMBOL    = Config.SYMBOL
+    # Use only the first symbol for the live dashboard chart feed.
+    # Multi-symbol scanning is handled by live_bot_service.py.
+    _SYMBOL    = Config.SYMBOL.split(",")[0].strip()
     _TIMEFRAME = Config.TIMEFRAME
     _BARS      = min(getattr(Config, "BARS", 2000), 5000)
 except Exception:
