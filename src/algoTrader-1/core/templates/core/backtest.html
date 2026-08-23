@@ -1,0 +1,1293 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="csrf-token" content="{{ csrf_token }}">
+<title>Backtest — Trading Dashboard</title>
+<link rel="stylesheet" href="{% static 'core/theme.css' %}">
+<script src="{% static 'core/chartjs.min.js' %}"></script>
+<script src="{% static 'core/lwc.min.js' %}"></script>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:#000;color:#c9d1d9;font-family:'Segoe UI',system-ui,-apple-system,sans-serif;min-height:100vh}
+
+/* ── Page nav (shared look with the rest of the app) ── */
+.nav-tabs{display:flex;gap:4px;padding:0 20px;background:#14161c;border-bottom:1px solid #2a2e38}
+.nav-tabs a{display:inline-block;padding:10px 16px;font-size:13px;color:#888;text-decoration:none;border-bottom:2px solid transparent}
+.nav-tabs a:hover{color:#ccc}
+.nav-tabs a.active{color:#4fc3f7;border-bottom-color:#4fc3f7}
+
+/* ── Bloomberg-style terminal bar ── */
+.terminal-bar{background:#0d1117;border-bottom:2px solid #d29922;padding:0 20px;display:flex;align-items:center;height:34px;gap:0}
+.tb-brand{font-size:11px;font-weight:900;letter-spacing:.18em;color:#d29922;margin-right:20px;font-family:'Courier New',monospace;white-space:nowrap}
+.tb-sep{width:1px;height:14px;background:#1c2332;margin:0 14px;flex-shrink:0}
+.tb-pill{font-size:10px;font-weight:600;letter-spacing:.08em;color:#6e7681;background:#161b22;border:1px solid #1c2332;padding:2px 8px;border-radius:2px;margin-right:5px;font-family:'Courier New',monospace;white-space:nowrap}
+.tb-pill.active{color:#d29922;border-color:rgba(210,153,34,.4)}
+.tb-right{margin-left:auto;display:flex;align-items:center;gap:10px}
+.tb-time{font-size:10px;color:#3d4451;font-family:'Courier New',monospace}
+.tb-dot{width:6px;height:6px;border-radius:50%;background:#3fb950;box-shadow:0 0 4px rgba(63,185,80,.5)}
+.tb-dot.stale{background:#3d4451;box-shadow:none}
+
+/* ── Main layout ── */
+.page-wrap{padding:18px 22px 40px;max-width:1900px;margin:0 auto}
+.clr-green{color:#3fb950}.clr-red{color:#f85149}.clr-blue{color:#2f81f7}
+
+.empty-state{padding:80px 20px;text-align:center;color:#3d4451;font-size:13px}
+.empty-state .big{font-size:15px;color:#6e7681;margin-bottom:8px}
+.empty-state code{background:#161b22;border:1px solid #1c2332;border-radius:3px;padding:2px 6px;color:#d29922;font-family:'Courier New',monospace}
+
+/* ── Run Backtest panel ── */
+.run-panel{background:#0d1117;border:1px solid #1c2332;border-radius:2px;padding:14px 18px;margin:18px 0}
+.run-hdr{display:flex;align-items:flex-end;gap:22px;flex-wrap:wrap}
+.run-group{display:flex;flex-direction:column;gap:6px}
+.run-group-timeframes{flex:1;min-width:220px}
+.run-group-strategies{flex:1;min-width:260px}
+.run-group-daterange{min-width:220px}
+.date-range-inputs{display:flex;align-items:center;gap:6px}
+.date-range-inputs input[type="date"]{background:#090b0f;border:1px solid #1c2332;border-radius:6px;padding:4px 8px;font-size:11px;color:#e6edf3;color-scheme:dark;font-family:inherit}
+.date-range-inputs input[type="date"]:focus{outline:none;border-color:#2f81f7}
+.date-range-sep{color:#6e7681;font-size:11px}
+.run-group-lbl{font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:#3d4451;font-weight:700;display:flex;align-items:center;gap:10px}
+.strat-all-lbl{display:inline-flex;align-items:center;gap:4px;font-size:9px;color:#6e7681;text-transform:none;letter-spacing:0;font-weight:600;cursor:pointer}
+.strategy-checks{display:flex;flex-wrap:wrap;gap:6px}
+.strat-chip{display:inline-flex;align-items:center;gap:5px;background:#090b0f;border:1px solid #1c2332;border-radius:12px;padding:4px 10px 4px 8px;font-size:11px;color:#6e7681;cursor:pointer;user-select:none}
+.strat-chip:hover{border-color:#2f81f7}
+.strat-chip.checked{color:#e6edf3;border-color:#2f81f7;background:rgba(47,129,247,.08)}
+.strat-chip input{accent-color:#2f81f7;cursor:pointer}
+.run-cfg{font-size:10px;color:#6e7681;font-family:'Courier New',monospace;line-height:1.6;margin-top:10px}
+.run-cfg b{color:#d29922;font-weight:700}
+.run-btn{background:#143d20;color:#3fb950;border:1px solid #2e7d32;border-radius:2px;padding:8px 18px;font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;cursor:pointer;white-space:nowrap}
+.run-btn:hover{background:#1a4d29}
+.run-btn:disabled{cursor:not-allowed;opacity:.6}
+.run-btn.running{background:#3d2e0a;color:#d29922;border-color:#d29922;animation:runPulse 1s ease-in-out infinite}
+.run-btn.error{background:#401414;color:#f85149;border-color:#f85149}
+.cancel-btn{background:#401414;color:#f85149;border-color:#f85149}
+.cancel-btn:hover{background:#4d1919}
+@keyframes runPulse{0%,100%{opacity:1}50%{opacity:.55}}
+.run-status-line{font-size:10px;color:#3d4451;margin-top:4px;font-family:'Courier New',monospace}
+.run-log{display:none;margin-top:10px;background:#090b0f;border:1px solid #1c2332;border-radius:2px;padding:10px 12px;max-height:220px;overflow-y:auto;font-size:11px;font-family:'Courier New',monospace;color:#6e7681;white-space:pre-wrap}
+.run-log.open{display:block}
+.run-log .err-line{color:#f85149}
+
+/* ── Section header ── */
+.section-hdr{display:flex;align-items:baseline;gap:12px;margin-bottom:10px}
+.section-lbl{font-size:9px;text-transform:uppercase;letter-spacing:.12em;color:#3d4451;font-weight:700}
+.section-sub{font-size:10px;color:#3d4451;font-family:'Courier New',monospace}
+
+/* ── Metric cards ── */
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(165px,1fr));gap:8px;margin-bottom:18px}
+.card{background:#0d1117;border:1px solid #1c2332;border-left:3px solid #2f81f7;border-radius:2px;padding:14px 16px;transition:border-left-color .15s}
+.card:hover{border-left-color:#d29922}
+.card-lbl{font-size:9px;text-transform:uppercase;letter-spacing:.12em;color:#3d4451;margin-bottom:9px;font-weight:700}
+.card-val{font-size:22px;font-weight:700;line-height:1;font-family:'Courier New',Courier,monospace;letter-spacing:-.01em}
+.card-sub{font-size:10px;color:#3d4451;margin-top:6px;font-family:'Courier New',monospace}
+.bw-meta{font-size:9px;line-height:1.5;word-break:break-word}
+
+/* ── Charts ── */
+.charts{display:grid;grid-template-columns:2.2fr 1fr;gap:8px;margin-bottom:18px}
+.chart-box{background:#0d1117;border:1px solid #1c2332;border-radius:2px;padding:16px}
+.chart-lbl{font-size:9px;text-transform:uppercase;letter-spacing:.12em;color:#3d4451;margin-bottom:12px;font-weight:700}
+
+/* ── Table boxes ── */
+.tbl-box{background:#0d1117;border:1px solid #1c2332;border-radius:2px;padding:14px 18px;overflow-x:auto;margin-bottom:18px}
+.tbl-lbl{font-size:9px;text-transform:uppercase;letter-spacing:.12em;color:#3d4451;margin-bottom:10px;font-weight:700}
+table{width:100%;border-collapse:collapse;font-size:12px}
+thead th{padding:6px 11px;text-align:left;font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:#3d4451;background:#090b0f;border-bottom:1px solid #1c2332;font-weight:700}
+.trade-log-scroll{max-height:600px;overflow-y:auto;overflow-x:auto}
+.trade-log-scroll thead th{position:sticky;top:0;z-index:2}
+tbody td{padding:6px 11px;border-bottom:1px solid #0d1117;color:#6e7681;font-family:'Courier New',monospace;font-size:12px}
+tbody tr:nth-child(even) td{background:rgba(255,255,255,.013)}
+tbody tr:hover td{background:#161b22}
+tbody td.hl{color:#c9d1d9}
+tbody td.muted{color:#3d4451;font-size:11px;font-family:'Segoe UI',system-ui,sans-serif}
+
+/* ── Badges ── */
+.badge{display:inline-block;padding:1px 7px;border-radius:2px;font-size:10px;font-weight:700;letter-spacing:.06em}
+.b-long{background:rgba(63,185,80,.1);color:#3fb950;border:1px solid rgba(63,185,80,.28)}
+.b-short{background:rgba(248,81,73,.1);color:#f85149;border:1px solid rgba(248,81,73,.28)}
+.win-txt{color:#3fb950;font-weight:700}.los-txt{color:#f85149;font-weight:700}
+.fri-session-tag{display:inline-block;font-size:8px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:#d29922;border:1px solid #4a3a10;border-radius:6px;padding:1px 4px;margin-left:4px;cursor:help}
+
+/* ── Filters ── */
+.tbl-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:6px}
+.filter-bar{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+.month-select{background:#090b0f;color:#6e7681;border:1px solid #1c2332;border-radius:2px;padding:3px 8px;font-size:10px;cursor:pointer;outline:none;font-family:'Courier New',monospace}
+.month-select:hover{border-color:#d29922;color:#c9d1d9}
+.month-select option{background:#090b0f}
+
+/* ── Monthly calendar ── */
+.month-calendar{display:grid;grid-template-columns:repeat(auto-fill,minmax(138px,1fr));gap:7px;padding:2px 0}
+.month-cell{border-radius:2px;padding:12px 14px;border:1px solid;transition:transform .1s;cursor:default}
+.month-cell:hover{transform:translateY(-1px)}
+.month-cell.mc-profit{background:rgba(63,185,80,.07);border-color:rgba(63,185,80,.22)}
+.month-cell.mc-loss{background:rgba(248,81,73,.07);border-color:rgba(248,81,73,.22)}
+.mc-name{font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:#3d4451;margin-bottom:7px;font-weight:700}
+.mc-pnl{font-size:18px;font-weight:700;line-height:1;margin-bottom:7px;font-family:'Courier New',monospace}
+.mc-pnl.mc-pos{color:#3fb950}.mc-pnl.mc-neg{color:#f85149}
+.mc-divider{border:none;border-top:1px solid #1c2332;margin:5px 0}
+.mc-row{display:flex;justify-content:space-between;align-items:center;font-size:10px;color:#3d4451;margin-top:3px}
+.mc-lbl{font-size:9px;text-transform:uppercase;letter-spacing:.06em}
+.mc-val{font-weight:700;font-size:11px;font-family:'Courier New',monospace}
+.mc-val.c-trades{color:#2f81f7}.mc-val.c-wins{color:#3fb950}.mc-val.c-losses{color:#f85149}
+
+/* ── Symbol section ── */
+.sym-section-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.sym-section-lbl{font-size:9px;text-transform:uppercase;letter-spacing:.12em;color:#3d4451;font-weight:700}
+.sym-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(195px,1fr));gap:8px;margin-bottom:18px}
+.sym-card{background:#0d1117;border:1px solid #1c2332;border-left:3px solid;border-radius:2px;padding:14px 16px;position:relative;overflow:hidden}
+.sym-badge{display:inline-block;padding:1px 7px;border-radius:2px;font-size:10px;font-weight:800;letter-spacing:.08em;border:1px solid;font-family:'Courier New',monospace}
+
+/* ── Symbol table ── */
+.sym-table-wrap{background:#0d1117;border:1px solid #1c2332;border-radius:2px;padding:14px 18px;margin-bottom:18px;overflow-x:auto}
+.sym-table-lbl{font-size:9px;text-transform:uppercase;letter-spacing:.12em;color:#3d4451;margin-bottom:10px;font-weight:700}
+.sym-tbl{width:100%;border-collapse:collapse;font-size:12px}
+.sym-tbl thead th{padding:6px 11px;text-align:left;font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:#3d4451;background:#090b0f;border-bottom:1px solid #1c2332;font-weight:700}
+.sym-tbl tbody td{padding:6px 11px;border-bottom:1px solid #0d1117;color:#6e7681;font-family:'Courier New',monospace}
+.sym-tbl tbody tr:hover td{background:#161b22}
+.sym-tbl tfoot td{padding:7px 11px;border-top:1px solid #1c2332;font-weight:700;font-size:12px;color:#c9d1d9;background:#090b0f;font-family:'Courier New',monospace}
+
+/* ── Tabs ── */
+.tab-nav{display:flex;margin-bottom:18px;border-bottom:1px solid #1c2332}
+.tab-btn{padding:7px 18px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.12em;border:none;border-bottom:2px solid transparent;background:transparent;color:#3d4451;cursor:pointer;margin-bottom:-1px;transition:color .15s,border-color .15s}
+.tab-btn:hover{color:#6e7681}
+.tab-btn.active{color:#e6edf3;border-bottom-color:#d29922}
+.tab-pane{display:none}.tab-pane.active{display:block}
+
+/* ── Candles pane ── */
+.candle-wrap{background:#0d1117;border:1px solid #1c2332;border-radius:2px;padding:16px}
+.candle-toolbar{display:flex;align-items:flex-end;gap:22px;flex-wrap:wrap;margin-bottom:6px}
+.candle-group{display:flex;flex-direction:column;gap:6px}
+.candle-group-grow{flex:1;min-width:280px}
+.candle-group-lbl{font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:#3d4451;font-weight:700}
+.candle-btn-row{display:flex;flex-wrap:wrap;gap:6px}
+.candle-btn{background:#090b0f;border:1px solid #1c2332;border-radius:12px;padding:4px 12px;font-size:11px;color:#6e7681;cursor:pointer}
+.candle-btn:hover{border-color:#2f81f7}
+.candle-btn.active{color:#e6edf3;border-color:#d29922;background:rgba(210,153,34,.1)}
+.candle-btn.strat-on{color:#3fb950;border-color:#2e7d32;background:rgba(63,185,80,.1)}
+.candle-btn:disabled{opacity:.35;cursor:not-allowed}
+.candle-btn:disabled:hover{border-color:#1c2332}
+#candleChart{width:100%;height:520px;margin-top:10px}
+
+/* ── Streak modal ── */
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:999;align-items:center;justify-content:center}
+.modal-overlay.open{display:flex}
+.modal-box{background:#0d1117;border:1px solid #1c2332;border-top:2px solid #d29922;border-radius:2px;padding:22px 26px;width:min(820px,92vw);max-height:82vh;overflow-y:auto;position:relative}
+.modal-title{font-size:13px;font-weight:700;color:#e6edf3;margin-bottom:3px;font-family:'Courier New',monospace}
+.modal-sub{font-size:10px;color:#3d4451;margin-bottom:16px}
+.modal-close{position:absolute;top:14px;right:16px;background:none;border:none;color:#3d4451;font-size:18px;cursor:pointer;line-height:1}
+.modal-close:hover{color:#c9d1d9}
+.modal-tbl{width:100%;border-collapse:collapse;font-size:12px}
+.modal-tbl thead th{padding:6px 11px;text-align:left;font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:#3d4451;background:#090b0f;border-bottom:1px solid #1c2332}
+.modal-tbl tbody td{padding:6px 11px;border-bottom:1px solid #0d1117;color:#6e7681;font-family:'Courier New',monospace}
+.modal-tbl tbody tr:hover td{background:#161b22}
+.streak-card{cursor:pointer}
+.streak-card:hover{border-left-color:#d29922 !important}
+
+@media(max-width:900px){
+  .charts{grid-template-columns:1fr}
+  .cards{grid-template-columns:repeat(auto-fill,minmax(140px,1fr))}
+  .sym-cards{grid-template-columns:repeat(auto-fill,minmax(155px,1fr))}
+}
+@media(max-width:600px){
+  .page-wrap{padding:10px 12px 28px}
+  .cards{grid-template-columns:repeat(2,1fr)}
+  .card-val{font-size:18px}
+  .tb-pill{display:none}
+  .tb-sep{display:none}
+}
+</style>
+</head>
+<body>
+
+{% include 'core/_nav.html' %}
+{% include 'core/_header.html' %}
+
+<div class="terminal-bar">
+  <span class="tb-brand">ALGO · BACKTEST</span>
+  <div class="tb-sep"></div>
+  <span class="tb-pill active" id="tbStrategies">—</span>
+  <span class="tb-pill" id="tbSymbols">—</span>
+  <span class="tb-pill" id="tbTrades">—</span>
+  <span class="tb-pill" id="tbDates">—</span>
+  <div class="tb-right">
+    <button class="month-select" id="refreshBtn" type="button" title="Re-read trade_data.csv">↻ Refresh</button>
+    <span class="tb-time" id="tbTime"></span>
+    <div class="tb-dot" id="tbDot" title="Data freshness"></div>
+  </div>
+</div>
+
+<div class="page-wrap">
+
+<div class="run-panel">
+  <div class="run-hdr">
+    <div class="run-group run-group-timeframes">
+      <div class="run-group-lbl">
+        Timeframes
+        <label class="strat-all-lbl"><input type="checkbox" id="allTimeframesChk"> All</label>
+      </div>
+      <div id="timeframeChecks" class="strategy-checks"></div>
+    </div>
+    <div class="run-group run-group-strategies">
+      <div class="run-group-lbl">
+        Strategies
+        <label class="strat-all-lbl"><input type="checkbox" id="allStrategiesChk" checked> All</label>
+      </div>
+      <div id="strategyChecks" class="strategy-checks"></div>
+    </div>
+    <div class="run-group run-group-daterange">
+      <div class="run-group-lbl">Date Range (optional, UTC)</div>
+      <div class="date-range-inputs">
+        <input type="date" id="dateFromInput" title="From (leave blank to use Bars instead)">
+        <span class="date-range-sep">→</span>
+        <input type="date" id="dateToInput" title="To (blank = now)">
+        <button type="button" id="clearDateRangeBtn" class="candle-btn" title="Clear date range, use Bars instead">✕</button>
+      </div>
+    </div>
+    <div class="run-group run-group-risk">
+      <div class="run-group-lbl">Risk (applies to every selected strategy)</div>
+      <div class="date-range-inputs">
+        <select id="riskModeSelect" title="percent = risk a % of capital; fixed = risk a flat $ amount every trade">
+          <option value="percent">% of capital</option>
+          <option value="fixed">Fixed $ per trade</option>
+        </select>
+        <input type="number" step="1" min="0" id="riskAmountInput" placeholder="$ e.g. 25" title="Dollars risked per trade (fixed mode only) -- lot size = risk $ / (stoploss distance x contract size)" style="display:none">
+        <input type="number" step="0.01" min="0.01" id="maxLotSizeInput" placeholder="max lot e.g. 0.1" title="Safety ceiling on lot size regardless of risk mode -- protects against a tiny stoploss (near-doji signal candle) otherwise sizing an absurdly large position">
+      </div>
+    </div>
+    <button class="run-btn" id="runBtn" type="button">▶ Run Backtest</button>
+    <button class="run-btn cancel-btn" id="cancelBtn" type="button" style="display:none">■ Cancel</button>
+  </div>
+  <div class="run-cfg" id="runCfg"></div>
+  <div class="run-status-line" id="runStatusLine"></div>
+  <div class="run-log" id="runLog"></div>
+</div>
+
+<div class="tab-nav">
+  <button class="tab-btn active" id="tabBtnPerformance" type="button" onclick="switchTab('performance', this)">Performance</button>
+  <button class="tab-btn" id="tabBtnCandles" type="button" onclick="switchTab('candles', this)">Candles</button>
+</div>
+
+<div id="pane-performance" class="tab-pane active">
+
+<div id="emptyState" class="empty-state" style="display:none">
+  <div class="big">No backtest results yet</div>
+  <div>Pick one or more timeframes and strategies above and click Run Backtest, or run <code>python -m algoTrading.main_backtest</code> from <code>src/algoTrading/</code> yourself, then click Refresh.</div>
+</div>
+
+<div id="resultsRoot" style="display:none">
+
+<div class="section-hdr">
+  <span class="section-lbl">Overall Performance</span>
+  <span class="section-sub" id="sectionSub"></span>
+  <span class="section-sub" style="margin-left:auto;display:flex;align-items:center;gap:6px">
+    Viewing: <select id="resultsTfSelect" class="month-select"></select>
+  </span>
+</div>
+
+<div class="cards" id="cards"></div>
+
+<div id="sym-section" style="display:none">
+  <div class="sym-section-hdr">
+    <div class="sym-section-lbl">Symbol Breakdown</div>
+  </div>
+  <div id="sym-cards" class="sym-cards"></div>
+</div>
+
+<div class="charts">
+  <div class="chart-box">
+    <div class="chart-lbl">Equity Curve</div>
+    <canvas id="eqChart" height="110"></canvas>
+  </div>
+  <div class="chart-box">
+    <div class="chart-lbl">Trade P&amp;L</div>
+    <canvas id="plChart" height="110"></canvas>
+  </div>
+</div>
+
+<div class="tbl-box">
+  <div class="tbl-lbl">Monthly Performance Calendar</div>
+  <div id="month-calendar" class="month-calendar"></div>
+</div>
+
+<div class="tbl-box">
+  <div class="tbl-hdr">
+    <div class="tbl-lbl" style="margin-bottom:0">Trade Log</div>
+    <div class="filter-bar">
+      <select id="stratFilter" class="month-select"><option value="all">All Strategies</option></select>
+      <select id="symFilter" class="month-select"><option value="all">All Symbols</option></select>
+      <select id="monthFilter" class="month-select"><option value="all">All Months</option></select>
+    </div>
+  </div>
+  <div class="trade-log-scroll">
+    <table>
+      <thead>
+        <tr>
+          <th>#</th><th>Entry Time</th><th>Exit Time</th><th>Symbol</th><th>Strategy</th><th>Dir</th>
+          <th>Entry</th><th>Stop Loss</th><th>Target</th><th>Exit</th><th>Closed By</th>
+          <th>Lot Size</th><th>Candle Size</th><th>P &amp; L</th><th>Capital</th>
+        </tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+</div>
+
+<div class="sym-table-wrap" id="symTableWrap" style="display:none">
+  <div class="sym-table-lbl">Symbol Performance Summary</div>
+  <table class="sym-tbl">
+    <thead>
+      <tr><th>Symbol</th><th>Trades</th><th>Wins</th><th>Losses</th><th>Win Rate</th><th>P &amp; L</th><th>Return %</th></tr>
+    </thead>
+    <tbody id="symTbody"></tbody>
+    <tfoot id="symTfoot"></tfoot>
+  </table>
+</div>
+
+</div><!-- /resultsRoot -->
+
+</div><!-- /pane-performance -->
+
+<div id="pane-candles" class="tab-pane">
+  <div class="candle-wrap">
+    <div class="candle-toolbar">
+      <div class="candle-group">
+        <div class="candle-group-lbl">Timeframe</div>
+        <div id="candleTfButtons" class="candle-btn-row"></div>
+      </div>
+      <div class="candle-group candle-group-grow">
+        <div class="candle-group-lbl">Strategies shown on chart (off by default)</div>
+        <div id="candleStrategyButtons" class="candle-btn-row"></div>
+      </div>
+      <button class="run-btn" id="stToggleBtn" type="button">Supertrend: ON</button>
+    </div>
+    <div id="candleStatusLine" class="run-status-line"></div>
+    <div id="candleChart"></div>
+  </div>
+</div><!-- /pane-candles -->
+
+</div><!-- /page-wrap -->
+
+<div class="modal-overlay" id="streakModal" onclick="closeStreakModal(event)">
+  <div class="modal-box">
+    <button class="modal-close" onclick="closeStreakModal(null)">✕</button>
+    <div class="modal-title" id="modalTitle"></div>
+    <div class="modal-sub" id="modalSub"></div>
+    <table class="modal-tbl">
+      <thead>
+        <tr><th>#</th><th>Exit Time</th><th>Symbol</th><th>Dir</th><th>Entry</th><th>Exit</th><th>P &amp; L</th><th>Capital</th></tr>
+      </thead>
+      <tbody id="modalTbody"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+// ---- state populated by /api/backtest/ on load and on Refresh click ----
+var rows = [], monthlyRows = [], eqLabels = [], eqData = [], plData = [], barClrs = [];
+var symbolsData = [], winStreakTrades = [], lossStreakTrades = [];
+var eqChartInst = null, plChartInst = null;
+
+function tickTime() {
+    document.getElementById("tbTime").textContent = new Date().toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour12: false });
+}
+tickTime();
+setInterval(tickTime, 1000);
+
+// ── Symbol color palette ──────────────────────────────────────
+var SYM_PALETTE = {
+  'XAUUSD': { color:'#f59e0b', bg:'rgba(245,158,11,.10)', border:'rgba(245,158,11,.30)' },
+  'EURUSD': { color:'#3b82f6', bg:'rgba(59,130,246,.10)',  border:'rgba(59,130,246,.30)'  },
+  'GBPUSD': { color:'#8b5cf6', bg:'rgba(139,92,246,.10)',  border:'rgba(139,92,246,.30)'  },
+  'USDJPY': { color:'#22c55e', bg:'rgba(34,197,94,.10)',   border:'rgba(34,197,94,.30)'   },
+  'USDCHF': { color:'#06b6d4', bg:'rgba(6,182,212,.10)',   border:'rgba(6,182,212,.30)'   },
+  'BTCUSD': { color:'#f97316', bg:'rgba(249,115,22,.10)',  border:'rgba(249,115,22,.30)'  },
+};
+var FALLBACK_COLORS = ['#a78bfa','#34d399','#fb7185','#38bdf8','#facc15','#e879f9'];
+var _symColorCache = {}, _symColorIdx = 0;
+function symColor(sym) {
+  if (_symColorCache[sym]) return _symColorCache[sym];
+  if (SYM_PALETTE[sym]) { _symColorCache[sym] = SYM_PALETTE[sym]; return _symColorCache[sym]; }
+  var c = FALLBACK_COLORS[_symColorIdx % FALLBACK_COLORS.length]; _symColorIdx++;
+  _symColorCache[sym] = { color: c, bg: 'rgba(0,0,0,.1)', border: 'rgba(128,128,128,.3)' };
+  return _symColorCache[sym];
+}
+
+function renderCards(m) {
+  var profitSign  = m.total_profit >= 0 ? "+" : "-";
+  var profitAbs   = "$" + Math.abs(m.total_profit).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
+  var profitColor = m.total_profit >= 0 ? "clr-green" : "clr-red";
+  var pctArrow    = m.profit_pct >= 0 ? "&#9650;" : "&#9660;";
+  var pctAbs      = Math.abs(m.profit_pct);
+  var wrColor     = m.win_rate >= 50 ? "clr-green" : "clr-red";
+  var pfColor     = m.pf_val >= 1 ? "clr-green" : "clr-red";
+  var avgWStr     = "+$" + m.avg_win.toFixed(2);
+  var avgLStr     = "$" + m.avg_loss.toFixed(2);
+  var avgAll      = plData.length ? (plData.reduce((a,b)=>a+b,0) / plData.length) : 0;
+  var avgAllStr   = avgAll >= 0 ? ("+$" + avgAll.toFixed(2)) : ("-$" + Math.abs(avgAll).toFixed(2));
+  var avgAllColor = avgAll >= 0 ? "clr-green" : "clr-red";
+  var streakHex   = m.cur_t === 'win' ? '#22c55e' : '#ef4444';
+  var streakLabel = m.cur_s + ' ' + m.cur_t.toUpperCase();
+
+  document.getElementById("cards").innerHTML = `
+    <div class="card">
+      <div class="card-lbl">Total Return</div>
+      <div class="card-val ${profitColor}">${profitSign}${profitAbs}</div>
+      <div class="card-sub">${pctArrow} ${pctAbs}%</div>
+    </div>
+    <div class="card">
+      <div class="card-lbl">Final Capital</div>
+      <div class="card-val clr-blue">$${m.end_cap.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
+      <div class="card-sub">Started $${m.start_cap.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
+    </div>
+    <div class="card">
+      <div class="card-lbl">Win Rate</div>
+      <div class="card-val ${wrColor}">${m.win_rate}%</div>
+      <div class="card-sub">${m.nw}W &nbsp;·&nbsp; ${m.nl}L &nbsp;·&nbsp; ${m.n} total</div>
+    </div>
+    <div class="card">
+      <div class="card-lbl">Profit Factor</div>
+      <div class="card-val ${pfColor}">${m.pf_display}</div>
+      <div class="card-sub">gross win ÷ gross loss</div>
+    </div>
+    <div class="card">
+      <div class="card-lbl">Avg Profit / Win</div>
+      <div class="card-val clr-green">${avgWStr}</div>
+      <div class="card-sub">over ${m.nw} winning trades</div>
+    </div>
+    <div class="card">
+      <div class="card-lbl">Avg Loss / Loss</div>
+      <div class="card-val clr-red">${avgLStr}</div>
+      <div class="card-sub">over ${m.nl} losing trades</div>
+    </div>
+    <div class="card">
+      <div class="card-lbl">Avg P&amp;L / Trade</div>
+      <div class="card-val ${avgAllColor}">${avgAllStr}</div>
+      <div class="card-sub">expectancy per trade</div>
+    </div>
+    <div class="card">
+      <div class="card-lbl">Biggest Win</div>
+      <div class="card-val clr-green">+$${m.biggest_win.profit.toFixed(2)}</div>
+      <div class="card-sub bw-meta">${m.biggest_win.time.slice(0,10)} &nbsp;·&nbsp; ${m.biggest_win.symbol} &nbsp;·&nbsp; ${m.biggest_win.strategy}</div>
+    </div>
+    <div class="card">
+      <div class="card-lbl">Biggest Loss</div>
+      <div class="card-val clr-red">$${m.biggest_loss.profit.toFixed(2)}</div>
+      <div class="card-sub bw-meta">${m.biggest_loss.time.slice(0,10)} &nbsp;·&nbsp; ${m.biggest_loss.symbol} &nbsp;·&nbsp; ${m.biggest_loss.strategy}</div>
+    </div>
+    <div class="card">
+      <div class="card-lbl">Max Drawdown</div>
+      <div class="card-val clr-red">${m.max_dd}%</div>
+      <div class="card-sub">Peak-to-trough</div>
+    </div>
+    <div class="card streak-card" onclick="openStreakModal('win')" title="Click to view trades">
+      <div class="card-lbl">Max Win Streak</div>
+      <div class="card-val clr-green">${m.max_ws}</div>
+      <div class="card-sub">consecutive wins &nbsp;↗</div>
+    </div>
+    <div class="card streak-card" onclick="openStreakModal('loss')" title="Click to view trades">
+      <div class="card-lbl">Max Loss Streak</div>
+      <div class="card-val clr-red">${m.max_ls}</div>
+      <div class="card-sub">consecutive losses &nbsp;↗</div>
+    </div>
+    <div class="card">
+      <div class="card-lbl">Current Streak</div>
+      <div class="card-val" style="color:${streakHex}">${streakLabel}</div>
+      <div class="card-sub">most recent run</div>
+    </div>
+  `;
+}
+
+function renderEquityChart() {
+  var ctx = document.getElementById('eqChart').getContext('2d');
+  if (eqChartInst) eqChartInst.destroy();
+  eqChartInst = new Chart(ctx, {
+    type: 'line',
+    data: { labels: eqLabels, datasets: [{
+      data: eqData, borderColor: '#2f81f7', backgroundColor: 'rgba(47,129,247,.08)',
+      fill: true, tension: 0.15, pointRadius: 0, borderWidth: 1.5,
+    }]},
+    options: {
+      responsive: true, plugins: { legend: { display: false } },
+      scales: {
+        x: { display: false },
+        y: { grid: { color: '#1c2332' }, ticks: { color: '#3d4451', font: { size: 9 } } },
+      },
+    },
+  });
+}
+
+function renderPlChart() {
+  var ctx = document.getElementById('plChart').getContext('2d');
+  if (plChartInst) plChartInst.destroy();
+  plChartInst = new Chart(ctx, {
+    type: 'bar',
+    data: { labels: plData.map((_, i) => i + 1), datasets: [{ data: plData, backgroundColor: barClrs }] },
+    options: {
+      responsive: true, plugins: { legend: { display: false } },
+      scales: {
+        x: { display: false },
+        y: { grid: { color: '#1c2332' }, ticks: { color: '#3d4451', font: { size: 9 } } },
+      },
+    },
+  });
+}
+
+function renderMonthlyCalendar() {
+  var html = '';
+  monthlyRows.forEach(function(r) {
+    var pos = r.profit >= 0;
+    var pnlStr = (pos ? '+$' : '-$') + Math.abs(r.profit).toFixed(2);
+    var pctStr = (pos ? '&#9650; ' : '&#9660; ') + Math.abs(r.profit_pct).toFixed(2) + '%';
+    var pctClr = pos ? '#3fb950' : '#f85149';
+    var wrClr = r.win_rate >= 50 ? '#3fb950' : '#f85149';
+    html +=
+      '<div class="month-cell ' + (pos ? 'mc-profit' : 'mc-loss') + '">' +
+        '<div class="mc-name">' + r.month + '</div>' +
+        '<div class="mc-pnl ' + (pos ? 'mc-pos' : 'mc-neg') + '">' + pnlStr + '</div>' +
+        '<div style="font-size:11px;font-family:monospace;color:' + pctClr + ';margin-bottom:6px;font-weight:700">' + pctStr + '</div>' +
+        '<hr class="mc-divider">' +
+        '<div class="mc-row"><span class="mc-lbl">Trades</span>  <span class="mc-val c-trades">' + r.trades + '</span></div>' +
+        '<div class="mc-row"><span class="mc-lbl">Wins</span>    <span class="mc-val c-wins">'   + r.wins   + '</span></div>' +
+        '<div class="mc-row"><span class="mc-lbl">Losses</span>  <span class="mc-val c-losses">' + r.losses + '</span></div>' +
+        '<div class="mc-row"><span class="mc-lbl">Win Rate</span><span class="mc-val" style="color:' + wrClr + '">' + r.win_rate + '%</span></div>' +
+      '</div>';
+  });
+  document.getElementById('month-calendar').innerHTML = html;
+}
+
+function renderSymbolSummary() {
+  if (!symbolsData.length) return;
+  document.getElementById('symTableWrap').style.display = 'block';
+  var totTrades = 0, totWins = 0, totLosses = 0, totPnl = 0;
+  var html = '';
+  symbolsData.forEach(function(s) {
+    var pos = s.profit >= 0;
+    var pnlStr = (pos ? '+$' : '-$') + Math.abs(s.profit).toFixed(2);
+    var pctStr = (pos ? '▲ ' : '▼ ') + Math.abs(s.profit_pct).toFixed(2) + '%';
+    var wrClr = s.win_rate >= 50 ? '#22c55e' : '#ef4444';
+    var pnlClr = pos ? '#22c55e' : '#ef4444';
+    var sc = symColor(s.symbol);
+    html +=
+      '<tr>' +
+        '<td><span class="sym-badge" style="color:' + sc.color + ';border-color:' + sc.border + ';background:' + sc.bg + '">' + s.symbol + '</span></td>' +
+        '<td style="color:#60a5fa">' + s.trades + '</td>' +
+        '<td style="color:#22c55e">' + s.wins   + '</td>' +
+        '<td style="color:#ef4444">' + s.losses + '</td>' +
+        '<td style="color:' + wrClr  + '">' + s.win_rate + '%</td>' +
+        '<td style="color:' + pnlClr + '">' + pnlStr + '</td>' +
+        '<td style="color:' + pnlClr + '">' + pctStr + '</td>' +
+      '</tr>';
+    totTrades += s.trades; totWins += s.wins; totLosses += s.losses; totPnl += s.profit;
+  });
+  document.getElementById('symTbody').innerHTML = html;
+
+  var totPos = totPnl >= 0;
+  var totPnlStr = (totPos ? '+$' : '-$') + Math.abs(totPnl).toFixed(2);
+  var totWrStr = totTrades ? (totWins / totTrades * 100).toFixed(1) + '%' : '—';
+  var totClr = totPos ? '#22c55e' : '#ef4444';
+  document.getElementById('symTfoot').innerHTML =
+    '<tr>' +
+      '<td style="color:#94a3b8">TOTAL</td>' +
+      '<td style="color:#60a5fa">' + totTrades + '</td>' +
+      '<td style="color:#22c55e">' + totWins   + '</td>' +
+      '<td style="color:#ef4444">' + totLosses + '</td>' +
+      '<td style="color:' + (parseFloat(totWrStr) >= 50 ? '#22c55e' : '#ef4444') + '">' + totWrStr + '</td>' +
+      '<td style="color:' + totClr + '">' + totPnlStr + '</td>' +
+      '<td style="color:#475569">—</td>' +
+    '</tr>';
+}
+
+function badgeDir(dir) {
+  return dir === 'LONG' ? '<span class="badge b-long">LONG</span>' : '<span class="badge b-short">SHORT</span>';
+}
+function badgeSym(sym) {
+  if (!sym) return '—';
+  var sc = symColor(sym);
+  return '<span class="sym-badge" style="color:' + sc.color + ';border-color:' + sc.border + ';background:' + sc.bg + '">' + sym + '</span>';
+}
+function labelBadge(label) {
+  var l = (label || '').toUpperCase();
+  var cls = l === 'SL' ? 'b-short' : (l === 'REV' ? 'b-long' : 'b-long');
+  return label ? '<span class="badge ' + cls + '">' + label + '</span>' : '—';
+}
+
+function friSessionTag(isFriSession) {
+  // Trades in the last ~2.5h before Friday's 21:00 UTC close roll forward
+  // onto Saturday's calendar date once shown in IST -- genuinely still
+  // inside market hours, not a weekend trade. Tag it so it doesn't read
+  // as a market-hours bug at a glance.
+  if (!isFriSession) return '';
+  return ' <span class="fri-session-tag" title="Still inside Friday\'s session (before the 21:00 UTC close) -- shows a Saturday date only because of the IST conversion, not a weekend trade">Fri</span>';
+}
+
+function renderTradeLog() {
+  var stratSel = document.getElementById('stratFilter').value;
+  var symSel = document.getElementById('symFilter').value;
+  var monthSel = document.getElementById('monthFilter').value;
+
+  var filtered = rows.filter(function(r) {
+    if (stratSel !== 'all' && r.strategy !== stratSel) return false;
+    if (symSel !== 'all' && r.symbol !== symSel) return false;
+    if (monthSel !== 'all' && r.time.slice(0,7) !== monthSel) return false;
+    return true;
+  });
+
+  var html = filtered.map(function(r) {
+    var pos = r.profit >= 0;
+    var pnlStr = (pos ? '+$' : '-$') + Math.abs(r.profit).toFixed(2);
+    return '<tr>' +
+      '<td class="muted">' + r.num + '</td>' +
+      '<td class="muted">' + r.entry_time + friSessionTag(r.entry_fri_session) + '</td>' +
+      '<td class="muted">' + r.time + friSessionTag(r.time_fri_session) + '</td>' +
+      '<td>' + badgeSym(r.symbol) + '</td>' +
+      '<td class="hl">' + (r.strategy || '—') + '</td>' +
+      '<td>' + badgeDir(r.dir) + '</td>' +
+      '<td class="hl">' + r.entry + '</td>' +
+      '<td>' + r.sl + '</td>' +
+      '<td>' + r.target + '</td>' +
+      '<td class="hl">' + r.exit + '</td>' +
+      '<td>' + labelBadge(r.label) + '</td>' +
+      '<td class="muted">' + (r.lot_size || '—') + '</td>' +
+      '<td class="muted">' + (r.candle_size || '—') + '</td>' +
+      '<td class="' + (pos ? 'win-txt' : 'los-txt') + '">' + pnlStr + '</td>' +
+      '<td style="color:#60a5fa">$' + r.cap.toLocaleString() + '</td>' +
+    '</tr>';
+  }).join('');
+  document.getElementById('tbody').innerHTML = html || '<tr><td colspan="15" style="text-align:center;color:#334155;padding:20px">No trades match filters</td></tr>';
+}
+
+function populateFilters() {
+  var strategies = Array.from(new Set(rows.map(r => r.strategy).filter(Boolean))).sort();
+  var symbols = Array.from(new Set(rows.map(r => r.symbol).filter(Boolean))).sort();
+  var months = Array.from(new Set(rows.map(r => r.time.slice(0,7)))).sort();
+
+  var stratSel = document.getElementById('stratFilter');
+  strategies.forEach(s => { var o = document.createElement('option'); o.value = s; o.textContent = s; stratSel.appendChild(o); });
+
+  var symSel = document.getElementById('symFilter');
+  symbols.forEach(s => { var o = document.createElement('option'); o.value = s; o.textContent = s; symSel.appendChild(o); });
+
+  var monthSel = document.getElementById('monthFilter');
+  months.forEach(m => { var o = document.createElement('option'); o.value = m; o.textContent = m; monthSel.appendChild(o); });
+
+  [stratSel, symSel, monthSel].forEach(el => el.addEventListener('change', renderTradeLog));
+}
+
+function openStreakModal(type) {
+  var trades = type === 'win' ? winStreakTrades : lossStreakTrades;
+  var title = type === 'win' ? 'Max Win Streak' : 'Max Loss Streak';
+  var clr = type === 'win' ? '#22c55e' : '#ef4444';
+
+  document.getElementById('modalTitle').textContent = title;
+  document.getElementById('modalTitle').style.color = clr;
+  document.getElementById('modalSub').textContent = trades.length + ' consecutive ' + (type === 'win' ? 'winning' : 'losing') + ' trades';
+
+  var html = trades.map(function(t, i) {
+    var win = t.profit > 0;
+    var pnlStr = (win ? '+$' : '-$') + Math.abs(t.profit).toFixed(2);
+    var capStr = '$' + t.cap.toLocaleString();
+    return '<tr>' +
+      '<td class="muted">' + (i + 1) + '</td>' +
+      '<td class="muted">' + t.time + '</td>' +
+      '<td>' + badgeSym(t.symbol) + '</td>' +
+      '<td>' + badgeDir(t.dir) + '</td>' +
+      '<td class="hl">' + t.entry + '</td>' +
+      '<td class="hl">' + t.exit + '</td>' +
+      '<td class="' + (win ? 'win-txt' : 'los-txt') + '">' + pnlStr + '</td>' +
+      '<td style="color:#60a5fa">' + capStr + '</td>' +
+    '</tr>';
+  }).join('');
+  document.getElementById('modalTbody').innerHTML = html || '<tr><td colspan="8" style="text-align:center;color:#334155;padding:20px">No trades</td></tr>';
+  document.getElementById('streakModal').classList.add('open');
+}
+
+function closeStreakModal(e) {
+  if (e && e.target !== document.getElementById('streakModal')) return;
+  document.getElementById('streakModal').classList.remove('open');
+}
+
+const resultsTfSelectEl = document.getElementById('resultsTfSelect');
+let resultsTfInitialized = false;
+
+function renderResultsTfSelect(availableTfs, activeTf) {
+  const prevValue = resultsTfSelectEl.value;
+  resultsTfSelectEl.innerHTML = '';
+
+  const latestOpt = document.createElement('option');
+  latestOpt.value = ''; latestOpt.textContent = 'Latest run';
+  resultsTfSelectEl.appendChild(latestOpt);
+
+  (availableTfs || []).forEach(tf => {
+    const opt = document.createElement('option');
+    opt.value = tf; opt.textContent = tf;
+    resultsTfSelectEl.appendChild(opt);
+  });
+
+  // Prefer: explicit target timeframe > whatever was already selected (if
+  // still valid) > "Latest run" -- keeps the dropdown stable across polls
+  // instead of snapping back to "Latest run" on every refresh.
+  const options = Array.from(resultsTfSelectEl.options).map(o => o.value);
+  if (activeTf !== undefined && options.includes(activeTf)) {
+    resultsTfSelectEl.value = activeTf;
+  } else if (options.includes(prevValue)) {
+    resultsTfSelectEl.value = prevValue;
+  }
+
+  if (!resultsTfInitialized) {
+    resultsTfInitialized = true;
+    resultsTfSelectEl.addEventListener('change', () => loadBacktest(resultsTfSelectEl.value || null));
+  }
+}
+
+async function loadBacktest(timeframe) {
+  document.getElementById('tbDot').classList.remove('stale');
+  try {
+    const url = '/api/backtest/' + (timeframe ? ('?timeframe=' + encodeURIComponent(timeframe)) : '');
+    var res = await fetch(url);
+    var data = await res.json();
+
+    renderResultsTfSelect(data.available_timeframe_results, timeframe || '');
+
+    if (!data.available) {
+      document.getElementById('emptyState').style.display = 'block';
+      document.getElementById('resultsRoot').style.display = 'none';
+      document.getElementById('tbDot').classList.add('stale');
+      return;
+    }
+
+    document.getElementById('emptyState').style.display = 'none';
+    document.getElementById('resultsRoot').style.display = 'block';
+
+    var m = data.metrics;
+    rows = data.rows; monthlyRows = data.monthly_rows;
+    eqLabels = data.eq_labels; eqData = data.eq_data;
+    plData = data.profits; barClrs = plData.map(p => p > 0 ? '#22c55e' : '#ef4444');
+    symbolsData = data.symbols_data;
+    winStreakTrades = data.win_streak_trades; lossStreakTrades = data.loss_streak_trades;
+
+    document.getElementById('tbStrategies').textContent = m.strategies_str || 'Strategy';
+    document.getElementById('tbSymbols').textContent = m.symbols_str || 'Symbol';
+    document.getElementById('tbTrades').textContent = m.n + ' trades';
+    document.getElementById('tbDates').textContent = m.date_from.slice(0,10) + ' → ' + m.date_to.slice(0,10);
+    document.getElementById('sectionSub').textContent =
+      'All symbols combined · ' + m.n + ' closed trades · ' + m.date_from.slice(0,10) + ' → ' + m.date_to.slice(0,10);
+
+    renderCards(m);
+    if (symbolsData.length) document.getElementById('sym-section').style.display = 'block';
+    renderEquityChart();
+    renderPlChart();
+    renderMonthlyCalendar();
+    renderSymbolSummary();
+
+    ['stratFilter', 'symFilter', 'monthFilter'].forEach(id => {
+      var el = document.getElementById(id);
+      el.innerHTML = el.options[0].outerHTML;
+    });
+    populateFilters();
+    renderTradeLog();
+
+    // Keep the Candles pane (below) showing the SAME timeframe as the
+    // results just rendered above -- it used to be independent state,
+    // defaulting to whichever timeframe's ohlcv CSV happened to be
+    // "largest" on disk, so after running/viewing e.g. M15 results the
+    // chart could still be showing stale H1/D1 candles: trade markers
+    // would land on the wrong candles entirely (wrong timeframe, not
+    // just wrong bar). `timeframe` is null for the "Latest run" alias,
+    // where we don't know which underlying timeframe that maps to, so
+    // leave the chart alone in that case rather than guessing.
+    if (timeframe) syncCandlesToTimeframe(timeframe);
+  } catch (err) {
+    console.warn('Backtest data load failed:', err);
+    document.getElementById('tbDot').classList.add('stale');
+  }
+}
+
+function syncCandlesToTimeframe(timeframe) {
+  if (!candleChart || !timeframe || timeframe === candleTimeframe) return;
+  fetch('/api/backtest/candles/?symbol=' + encodeURIComponent(CANDLE_SYMBOL))
+    .then(res => res.json())
+    .then(data => {
+      if ((data.available_candle_timeframes || []).includes(timeframe)) {
+        loadCandles(timeframe);
+      }
+    })
+    .catch(() => {});
+}
+
+document.getElementById('refreshBtn').addEventListener('click', () => loadBacktest(resultsTfSelectEl.value || null));
+
+// ---- Run Backtest: launches the real MT5 fetch + strategy backtest as a
+// background subprocess (see backtest_runner.py) and polls its status
+// until done, then reloads this page's charts/tables from the fresh
+// trade_data.csv it wrote. CSRF-protected POST, not exempted -- this
+// kicks off a real MT5 session + several-minute background job, not a
+// passive read. ----
+const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
+const runBtn = document.getElementById('runBtn');
+const cancelBtn = document.getElementById('cancelBtn');
+const runCfgEl = document.getElementById('runCfg');
+const runStatusLineEl = document.getElementById('runStatusLine');
+const runLogEl = document.getElementById('runLog');
+const timeframeChecksEl = document.getElementById('timeframeChecks');
+const allTimeframesChk = document.getElementById('allTimeframesChk');
+const strategyChecksEl = document.getElementById('strategyChecks');
+const allStrategiesChk = document.getElementById('allStrategiesChk');
+const dateFromInputEl = document.getElementById('dateFromInput');
+const dateToInputEl = document.getElementById('dateToInput');
+const clearDateRangeBtn = document.getElementById('clearDateRangeBtn');
+const riskModeSelectEl = document.getElementById('riskModeSelect');
+const riskAmountInputEl = document.getElementById('riskAmountInput');
+const maxLotSizeInputEl = document.getElementById('maxLotSizeInput');
+let runPollTimer = null;
+let controlsInitialized = false;
+
+riskModeSelectEl.addEventListener('change', () => {
+  riskAmountInputEl.style.display = riskModeSelectEl.value === 'fixed' ? '' : 'none';
+});
+
+clearDateRangeBtn.addEventListener('click', () => {
+  dateFromInputEl.value = '';
+  dateToInputEl.value = '';
+});
+
+const STRATEGY_LABELS = {
+  engulfing: 'Engulfing',
+  green_dollar: 'Green Dollar',
+  greenDollar: 'Green Dollar (Bull Only)',
+  ma: 'Moving Average',
+  supertrend: 'Supertrend',
+  engulfing_consolidation: 'Engulfing+Consolidation',
+  engulfing_reversal: 'Engulfing Reversal',
+  mark2: 'Mark2',
+  mark_dollar_supertrend: 'Mark Dollar ST',
+  "20ema": '20 EMA',
+  engulf_volume_fade: 'Engulf Volume Fade',
+};
+
+function _buildCheckChips(container, values, checkedSet, chkClass, allChk) {
+  container.innerHTML = '';
+  values.forEach(value => {
+    const isChecked = checkedSet.has(value);
+    const chip = document.createElement('label');
+    chip.className = 'strat-chip' + (isChecked ? ' checked' : '');
+    chip.innerHTML = `<input type="checkbox" class="${chkClass}" value="${value}" ${isChecked ? 'checked' : ''}> ${STRATEGY_LABELS[value] || value}`;
+    const input = chip.querySelector('input');
+    input.addEventListener('change', () => {
+      chip.classList.toggle('checked', input.checked);
+      const all = document.querySelectorAll('.' + chkClass);
+      allChk.checked = Array.from(all).every(el => el.checked);
+    });
+    container.appendChild(chip);
+  });
+  allChk.addEventListener('change', () => {
+    document.querySelectorAll('.' + chkClass).forEach(el => {
+      el.checked = allChk.checked;
+      el.closest('.strat-chip').classList.toggle('checked', allChk.checked);
+    });
+  });
+}
+
+// ---- Timeframe + strategy checkboxes, built once from
+// /api/backtest/run-status/'s config.available_* lists and pre-selected to
+// match algoTrading/config.py's current defaults (single timeframe checked
+// to start, since that mirrors what a plain CLI run would do -- check more
+// to backtest several timeframes in one go). Built only once so an
+// in-progress selection isn't clobbered by later status polls. ----
+function initRunControls(cfg) {
+  if (controlsInitialized || !cfg) return;
+  controlsInitialized = true;
+
+  _buildCheckChips(timeframeChecksEl, cfg.available_timeframes || [], new Set([cfg.timeframe]), 'tf-chk', allTimeframesChk);
+  allTimeframesChk.checked = (cfg.available_timeframes || []).length === 1;
+
+  const currentStrategies = new Set((cfg.strategy || '').split(',').map(s => s.trim()).filter(Boolean));
+  _buildCheckChips(strategyChecksEl, cfg.available_strategies || [], currentStrategies, 'strat-chk', allStrategiesChk);
+  allStrategiesChk.checked = (cfg.available_strategies || []).every(s => currentStrategies.has(s));
+
+  if (cfg.date_from) {
+    dateFromInputEl.value = cfg.date_from;
+    dateToInputEl.value = cfg.date_to || '';
+  }
+
+  riskModeSelectEl.value = cfg.risk_mode || 'percent';
+  riskAmountInputEl.value = cfg.risk_amount || '';
+  riskAmountInputEl.style.display = riskModeSelectEl.value === 'fixed' ? '' : 'none';
+  maxLotSizeInputEl.value = cfg.max_lot_size || '';
+
+  runCfgEl.innerHTML =
+    'Symbol: <b>' + cfg.symbol + '</b> &nbsp;·&nbsp; Bars: <b>' + cfg.bars + '</b> &nbsp;·&nbsp; ' +
+    'RR: <b>' + cfg.rr + '</b> (' + cfg.tp_mode + ') &nbsp;·&nbsp; Risk/trade: <b>' +
+    (cfg.risk_mode === 'fixed' ? ('$' + cfg.risk_amount + ' fixed') : ((cfg.risk_per_trade * 100).toFixed(1) + '% of capital')) +
+    '</b> &nbsp;·&nbsp; Max lot: <b>' + cfg.max_lot_size + '</b>' +
+    '<br>Selected timeframes run in PARALLEL, up to <b>' + cfg.max_parallel_timeframes + '</b> at once, each its own MT5 fetch + backtest with its own result you can switch to via "Viewing" above.' +
+    '<br>Set a Date Range to fetch a specific window instead of the last <b>' + cfg.bars + '</b> bars (dates are UTC; leave "To" blank for "up to now").' +
+    '<br>Risk mode "Fixed $ per trade" sizes every strategy\'s lot as risk$ / (stoploss distance x contract size) instead of a % of capital.' +
+    '<br>Max lot caps position size regardless of mode -- protects against a near-zero-width stoploss otherwise sizing an absurdly large (and absurdly risky) trade.' +
+    '<br>Edit <code style="color:#6e7681">src/algoTrading/config.py</code> to change symbol/RR/risk defaults.';
+}
+
+function selectedStrategies() {
+  return Array.from(document.querySelectorAll('.strat-chk:checked')).map(el => el.value);
+}
+function selectedTimeframes() {
+  return Array.from(document.querySelectorAll('.tf-chk:checked')).map(el => el.value);
+}
+
+function renderRunState(state) {
+  initRunControls(state.config);
+  runLogEl.textContent = (state.log || []).join('\n');
+  runLogEl.scrollTop = runLogEl.scrollHeight;
+
+  const runningSet = new Set(state.current_timeframes || []);
+  const tfProgress = (state.timeframes || []).length > 1
+    ? ' [' + (state.timeframes || []).map(tf => {
+        const rc = (state.timeframe_results || {})[tf];
+        const mark = runningSet.has(tf) ? '●' : (rc === undefined ? '·' : (rc === 0 ? '✓' : '✗'));
+        return mark + tf;
+      }).join(' ') + ']'
+    : '';
+
+  if (state.status === 'running') {
+    runBtn.disabled = true;
+    const runningLabel = runningSet.size ? Array.from(runningSet).join('+') : '…';
+    runBtn.textContent = '● Running ' + runningLabel;
+    runBtn.className = 'run-btn running';
+    cancelBtn.style.display = 'inline-block';
+    cancelBtn.disabled = false;
+    runStatusLineEl.textContent = 'Fetching from MT5 and running strategies in parallel — this can take a while for 90k+ bars.' + tfProgress;
+    runLogEl.classList.add('open');
+  } else if (state.status === 'error') {
+    runBtn.disabled = false;
+    runBtn.textContent = '▶ Run Backtest';
+    runBtn.className = 'run-btn error';
+    cancelBtn.style.display = 'none';
+    runStatusLineEl.textContent = 'Last run had a failure — see log below.' + tfProgress;
+    runLogEl.classList.add('open');
+  } else if (state.status === 'cancelled') {
+    runBtn.disabled = false;
+    runBtn.textContent = '▶ Run Backtest';
+    runBtn.className = 'run-btn error';
+    cancelBtn.style.display = 'none';
+    runStatusLineEl.textContent = 'Cancelled.' + tfProgress;
+    runLogEl.classList.add('open');
+  } else if (state.status === 'done') {
+    runBtn.disabled = false;
+    runBtn.textContent = '▶ Run Backtest';
+    runBtn.className = 'run-btn';
+    cancelBtn.style.display = 'none';
+    runStatusLineEl.textContent = 'Last run finished — results below are current.' + tfProgress;
+  } else {
+    runBtn.disabled = false;
+    runBtn.textContent = '▶ Run Backtest';
+    runBtn.className = 'run-btn';
+    cancelBtn.style.display = 'none';
+    runStatusLineEl.textContent = '';
+  }
+}
+
+cancelBtn.addEventListener('click', async () => {
+  cancelBtn.disabled = true;
+  cancelBtn.textContent = '■ Cancelling…';
+  try {
+    const res = await fetch('/api/backtest/cancel/', {
+      method: 'POST',
+      headers: { 'X-CSRFToken': csrfToken },
+    });
+    const state = await res.json();
+    renderRunState(state);
+  } catch (err) {
+    console.warn('Cancel failed:', err);
+  } finally {
+    cancelBtn.textContent = '■ Cancel';
+  }
+});
+
+async function pollRunStatus(reloadOnDone) {
+  try {
+    const res = await fetch('/api/backtest/run-status/');
+    const state = await res.json();
+    renderRunState(state);
+
+    if (state.status === 'running') {
+      runPollTimer = setTimeout(() => pollRunStatus(true), 1500);
+    } else {
+      clearTimeout(runPollTimer);
+      if (reloadOnDone && (state.status === 'done' || state.status === 'cancelled')) {
+        // Show the first SUCCESSFULLY completed timeframe from this run
+        // (a cancelled run may still have finished one or more before the
+        // cancel landed) -- the rest are one dropdown-select away.
+        const completedTfs = (state.timeframes || []).filter(tf => (state.timeframe_results || {})[tf] === 0);
+        const target = completedTfs[0] || null;
+        if (target) loadBacktest(target);
+      }
+    }
+  } catch (err) {
+    console.warn('Run status poll failed:', err);
+  }
+}
+
+runBtn.addEventListener('click', async () => {
+  const strategies = selectedStrategies();
+  const timeframes = selectedTimeframes();
+  if (!strategies.length) {
+    runStatusLineEl.textContent = 'Select at least one strategy.';
+    return;
+  }
+  if (!timeframes.length) {
+    runStatusLineEl.textContent = 'Select at least one timeframe.';
+    return;
+  }
+  const dateFrom = dateFromInputEl.value || null;
+  const dateTo = dateToInputEl.value || null;
+  if (dateTo && !dateFrom) {
+    runStatusLineEl.textContent = '"To" date needs a "From" date too.';
+    return;
+  }
+
+  const riskMode = riskModeSelectEl.value;
+  const riskAmount = riskAmountInputEl.value ? parseFloat(riskAmountInputEl.value) : null;
+  if (riskMode === 'fixed' && !(riskAmount > 0)) {
+    runStatusLineEl.textContent = 'Enter a positive Risk amount ($) for fixed-risk mode.';
+    return;
+  }
+  const maxLotSize = maxLotSizeInputEl.value ? parseFloat(maxLotSizeInputEl.value) : null;
+  if (maxLotSizeInputEl.value && !(maxLotSize > 0)) {
+    runStatusLineEl.textContent = 'Max Lot Size must be a positive number.';
+    return;
+  }
+
+  runBtn.disabled = true;
+  runBtn.textContent = '● Starting…';
+  try {
+    const res = await fetch('/api/backtest/run/', {
+      method: 'POST',
+      headers: { 'X-CSRFToken': csrfToken, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        strategies: strategies, timeframes: timeframes, date_from: dateFrom, date_to: dateTo,
+        risk_mode: riskMode, risk_amount: riskMode === 'fixed' ? riskAmount : null,
+        max_lot_size: maxLotSize,
+      }),
+    });
+    const state = await res.json();
+    renderRunState(state);
+    if (state.status === 'running') {
+      pollRunStatus(true);
+    }
+  } catch (err) {
+    runBtn.disabled = false;
+    runBtn.textContent = '▶ Run Backtest';
+    console.warn('Failed to start backtest:', err);
+  }
+});
+
+pollRunStatus(false); // reflect an in-flight run if one's already going (e.g. started from another tab)
+
+loadBacktest();
+
+// ---- Tab switching (Performance / Candles). Candles pane is lazy-built --
+// LightweightCharts sizes itself off the container's clientWidth, which is
+// 0 while a tab-pane is display:none, so the chart can't be created until
+// the pane is actually visible. ----
+let candlesInitialized = false;
+
+function switchTab(name, btn) {
+  document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('pane-' + name).classList.add('active');
+  btn.classList.add('active');
+
+  if (name === 'candles' && !candlesInitialized) {
+    candlesInitialized = true;
+    requestAnimationFrame(initCandlePane);
+  }
+}
+
+// ---- Candles pane: OHLCV + Supertrend + trade markers for one symbol/
+// timeframe, backed by /api/backtest/candles/. Strategy buttons filter
+// which strategies' markers are drawn -- ALL START DISABLED, matching the
+// "off by default" request, so the chart opens clean and you opt into
+// whichever strategy's signals you want to inspect. ----
+const CANDLE_SYMBOL = '{{ symbol|default:"XAUUSD" }}';
+let candleChart = null, candleSeries = null, stSeries = null, stVisible = true;
+let candleTimeframe = null;
+let allCandleMarkers = [];
+let enabledChartStrategies = new Set(); // empty = nothing shown, by design
+
+function initCandlePane() {
+  const container = document.getElementById('candleChart');
+  if (typeof LightweightCharts === 'undefined') {
+    container.innerHTML = '<div style="color:#3d4451;text-align:center;padding:40px;font-size:12px">LightweightCharts library not loaded</div>';
+    return;
+  }
+
+  // Lightweight Charts formats its time axis in UTC by default -- force
+  // axis/crosshair labels into IST, same as the live dashboard's chart
+  // (candles.html), so the whole project shows one consistent timezone.
+  candleChart = LightweightCharts.createChart(container, {
+    width: container.clientWidth || 900,
+    height: 520,
+    layout: { background: { type: 'solid', color: '#07091a' }, textColor: '#4a5568' },
+    grid: { vertLines: { color: '#0d1526' }, horzLines: { color: '#0d1526' } },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    rightPriceScale: { borderColor: '#1a2540', scaleMargins: { top: 0.08, bottom: 0.05 } },
+    timeScale: {
+      borderColor: '#1a2540', timeVisible: true, secondsVisible: false, barSpacing: 8,
+      tickMarkFormatter: (time, tickMarkType) => {
+        const date = new Date(time * 1000);
+        const opts = { timeZone: 'Asia/Kolkata' };
+        if (tickMarkType === 0) return date.toLocaleDateString('en-IN', { ...opts, year: 'numeric' });
+        if (tickMarkType === 1) return date.toLocaleDateString('en-IN', { ...opts, month: 'short' });
+        if (tickMarkType === 2) return date.toLocaleDateString('en-IN', { ...opts, day: 'numeric' });
+        return date.toLocaleTimeString('en-IN', { ...opts, hour: '2-digit', minute: '2-digit', hour12: false });
+      },
+    },
+    localization: {
+      timeFormatter: (time) => {
+        const date = new Date(time * 1000);
+        return date.toLocaleString('en-IN', {
+          timeZone: 'Asia/Kolkata', hour12: false,
+          day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
+        }) + ' IST';
+      },
+    },
+  });
+  new ResizeObserver(() => { if (candleChart) candleChart.applyOptions({ width: container.clientWidth }); }).observe(container);
+
+  candleSeries = candleChart.addCandlestickSeries({
+    upColor: '#26a69a', downColor: '#ef5350',
+    borderUpColor: '#26a69a', borderDownColor: '#ef5350',
+    wickUpColor: '#26a69a', wickDownColor: '#ef5350',
+  });
+  stSeries = candleChart.addLineSeries({ lineWidth: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
+
+  document.getElementById('stToggleBtn').addEventListener('click', () => {
+    stVisible = !stVisible;
+    stSeries.applyOptions({ visible: stVisible });
+    const btn = document.getElementById('stToggleBtn');
+    btn.textContent = 'Supertrend: ' + (stVisible ? 'ON' : 'OFF');
+    btn.classList.toggle('active', stVisible);
+  });
+  document.getElementById('stToggleBtn').classList.add('active');
+
+  // Find out which timeframes actually have backtested data before
+  // rendering the timeframe buttons (undiscovered ones are shown but
+  // disabled, as a hint to go run that timeframe first).
+  fetch('/api/backtest/candles/?symbol=' + encodeURIComponent(CANDLE_SYMBOL))
+    .then(res => res.json())
+    .then(data => {
+      const available = data.available_candle_timeframes || [];
+      renderCandleTfButtons(available);
+      if (available.length) {
+        // Prefer whatever timeframe the Results panel above is currently
+        // showing -- otherwise this pane used to default to the largest
+        // timeframe that happened to have an ohlcv CSV on disk, which is
+        // often a stale leftover from an earlier session, not the one the
+        // user just ran/is looking at. Falls back to "largest available"
+        // only when Results is on "Latest run" (no specific timeframe) or
+        // hasn't loaded a timeframe this pane also has candles for.
+        const resultsTf = resultsTfSelectEl.value;
+        const initial = (resultsTf && available.includes(resultsTf)) ? resultsTf : available[available.length - 1];
+        loadCandles(initial);
+      } else {
+        document.getElementById('candleStatusLine').textContent = 'No timeframe has been backtested yet -- run one from the panel above.';
+      }
+    })
+    .catch(err => console.warn('Candle timeframe discovery failed:', err));
+}
+
+function renderCandleTfButtons(available) {
+  const allTfs = ['M1', 'M5', 'M15', 'M30', 'H1', 'H4', 'D1'];
+  const container = document.getElementById('candleTfButtons');
+  container.innerHTML = '';
+  allTfs.forEach(tf => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'candle-btn';
+    btn.textContent = tf;
+    btn.disabled = !available.includes(tf);
+    btn.title = btn.disabled ? 'Run a backtest on ' + tf + ' first' : '';
+    btn.addEventListener('click', () => loadCandles(tf));
+    container.appendChild(btn);
+  });
+}
+
+function setActiveCandleTfButton(tf) {
+  document.querySelectorAll('#candleTfButtons .candle-btn').forEach(b => {
+    b.classList.toggle('active', b.textContent === tf);
+  });
+}
+
+async function loadCandles(timeframe) {
+  candleTimeframe = timeframe;
+  setActiveCandleTfButton(timeframe);
+  document.getElementById('candleStatusLine').textContent = 'Loading ' + timeframe + '…';
+  try {
+    const res = await fetch('/api/backtest/candles/?symbol=' + encodeURIComponent(CANDLE_SYMBOL) + '&timeframe=' + encodeURIComponent(timeframe));
+    const data = await res.json();
+
+    if (!data.available) {
+      document.getElementById('candleStatusLine').textContent = 'No data for ' + timeframe + ' -- run a backtest on it first.';
+      renderCandleTfButtons(data.available_candle_timeframes || []);
+      setActiveCandleTfButton(timeframe);
+      return;
+    }
+
+    renderCandleTfButtons(data.available_candle_timeframes || []);
+    setActiveCandleTfButton(timeframe);
+
+    const candles = data.candles.map(c => {
+      const base = { time: c.time_unix, open: c.open, high: c.high, low: c.low, close: c.close };
+      if (c.color) return { ...base, color: c.color, borderColor: c.borderColor, wickColor: c.wickColor };
+      return base;
+    });
+    candleSeries.setData(candles);
+    stSeries.setData(data.supertrend.map(p => ({ time: p.time_unix, value: p.value, color: p.color })));
+    candleChart.timeScale().fitContent();
+
+    allCandleMarkers = data.markers || [];
+    renderCandleStrategyButtons();
+    applyMarkerFilter();
+
+    document.getElementById('candleStatusLine').textContent =
+      candles.length + ' candles · ' + allCandleMarkers.length + ' trade markers · ' + timeframe;
+  } catch (err) {
+    document.getElementById('candleStatusLine').textContent = 'Failed to load candles: ' + err;
+    console.warn('loadCandles failed:', err);
+  }
+}
+
+function renderCandleStrategyButtons() {
+  const strategies = Array.from(new Set(allCandleMarkers.map(m => m.strategy))).sort();
+  const container = document.getElementById('candleStrategyButtons');
+  container.innerHTML = '';
+  if (!strategies.length) {
+    container.innerHTML = '<span style="font-size:11px;color:#3d4451">No trades on this timeframe</span>';
+    return;
+  }
+  strategies.forEach(name => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'candle-btn' + (enabledChartStrategies.has(name) ? ' strat-on' : '');
+    btn.textContent = STRATEGY_LABELS[name] || name;
+    btn.addEventListener('click', () => {
+      if (enabledChartStrategies.has(name)) enabledChartStrategies.delete(name);
+      else enabledChartStrategies.add(name);
+      btn.classList.toggle('strat-on', enabledChartStrategies.has(name));
+      applyMarkerFilter();
+    });
+    container.appendChild(btn);
+  });
+}
+
+function applyMarkerFilter() {
+  if (!candleSeries) return;
+  const filtered = allCandleMarkers
+    .filter(m => enabledChartStrategies.has(m.strategy))
+    .map(m => ({ time: m.time_unix, position: m.position, color: m.color, shape: m.shape, text: m.text }))
+    .sort((a, b) => a.time - b.time);
+  candleSeries.setMarkers(filtered);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,622 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="csrf-token" content="{{ csrf_token }}">
+<title>{{ symbol }} - Live Supertrend Dashboard</title>
+<link rel="stylesheet" href="{% static 'core/theme.css' %}">
+<script src="{% static 'core/lwc.min.js' %}"></script>
+<style>
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, Segoe UI, Arial, sans-serif; background: #000; color: #e6e6e6; margin: 0; }
+
+    /* Per-strategy enable/disable buttons. One button per registered
+       strategy, rendered from /api/strategies/ -- a new strategy shows up
+       here automatically, no template change needed. */
+    .strategy-bar {
+        display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+        padding: 8px 20px; background: #14161c; border-bottom: 1px solid #2a2e38;
+    }
+    .strategy-bar .label {
+        font-size: 11px; font-weight: 700; color: #888; text-transform: uppercase;
+        letter-spacing: 0.05em; margin-right: 4px;
+    }
+    .strategy-btn {
+        background: #1a1d24; color: #666; border: 1px solid #2a2e38; border-radius: 12px;
+        padding: 4px 10px; font-size: 11px; cursor: pointer; white-space: nowrap;
+    }
+    .strategy-btn:hover { background: #2f3340; }
+    .strategy-btn.on { color: #4caf50; border-color: #2e7d32; background: #143d20; }
+    .strategy-btn.off { color: #666; border-color: #2a2e38; text-decoration: line-through; }
+    .strategy-rr-input {
+        width: 42px; margin: 0 6px 0 -2px; background: #1a1d24; color: #ccc;
+        border: 1px solid #2a2e38; border-radius: 8px; padding: 3px 5px; font-size: 11px;
+    }
+    .strategy-st-filter {
+        display: inline-flex; align-items: center; gap: 3px; margin: 0 6px 0 -2px;
+        color: #888; font-size: 10px; cursor: pointer; user-select: none;
+    }
+    .strategy-st-filter input { cursor: pointer; }
+
+    .nav-tabs {
+        display: flex; gap: 4px; padding: 0 20px; background: #14161c;
+        border-bottom: 1px solid #2a2e38; position: sticky; top: 49px; z-index: 9;
+    }
+    .nav-tabs a {
+        display: inline-block; padding: 10px 16px; font-size: 13px; color: #888;
+        text-decoration: none; border-bottom: 2px solid transparent;
+    }
+    .nav-tabs a:hover { color: #ccc; }
+    .nav-tabs a.active { color: #4fc3f7; border-bottom-color: #4fc3f7; }
+
+    /* Forex news ticker tape -- free/open RSS feed, scrolled via CSS
+       animation. Content is duplicated once in the track so translateX
+       from 0 to -50% loops seamlessly with no visible jump/reset. */
+    .news-ticker {
+        display: flex; align-items: center; background: #14161c;
+        border-bottom: 1px solid #2a2e38; height: 34px; overflow: hidden;
+    }
+    .news-ticker-label {
+        flex-shrink: 0; background: #b71c1c; color: #fff; font-size: 11px; font-weight: 700;
+        text-transform: uppercase; letter-spacing: 0.05em; padding: 5px 12px; margin-right: 14px;
+    }
+    .news-ticker-viewport { flex: 1; overflow: hidden; white-space: nowrap; }
+    .news-ticker-track { display: inline-block; white-space: nowrap; animation: newsScroll 90s linear infinite; }
+    .news-ticker-track .item { display: inline-flex; align-items: center; gap: 8px; margin-right: 48px; font-size: 13px; color: #ccc; }
+    .news-ticker-track .item a { color: inherit; text-decoration: none; }
+    .news-ticker-track .item a:hover { text-decoration: underline; color: #4fc3f7; }
+    .news-ticker-track .item .dot { color: #555; margin: 0 8px; }
+    .news-ticker-track .item .news-time { color: #777; font-variant-numeric: tabular-nums; font-size: 12px; }
+    .news-ticker-track .item .impact { font-size: 10px; font-weight: 700; text-transform: uppercase; padding: 2px 6px; border-radius: 8px; }
+    .news-ticker-track .item .impact-high { background: #401414; color: #ef5350; }
+    .news-ticker-track .item .impact-medium { background: #3d2e0a; color: #ffb74d; }
+    .news-ticker-track .item .impact-low { background: #23262e; color: #888; }
+    @keyframes newsScroll { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+
+    main { padding: 20px; }
+    #status { color: #888; font-size: 12px; margin-bottom: 16px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 20px; }
+    .panel { background: #1a1d24; border: 1px solid #2a2e38; border-radius: 8px; padding: 10px; }
+    .panel-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+    .panel-header h2 { font-size: 14px; margin: 0; color: #4fc3f7; }
+    .trend-badge { font-size: 11px; padding: 2px 8px; border-radius: 10px; font-weight: 600; }
+    .trend-badge.up { background: #143d20; color: #4caf50; }
+    .trend-badge.down { background: #401414; color: #ef5350; }
+    .chart { width: 100%; height: 260px; }
+    .empty { color: #888; font-size: 12px; padding: 40px 0; text-align: center; }
+</style>
+</head>
+<body>
+    {% include 'core/_nav.html' %}
+    {% include 'core/_header.html' %}
+
+    <div class="strategy-bar" id="strategyBar"><span class="label">Strategies</span></div>
+
+    <div class="news-ticker">
+        <span class="news-ticker-label">📰 Forex News</span>
+        <div class="news-ticker-viewport">
+            <div class="news-ticker-track" id="newsTrack"><span class="item">Loading news…</span></div>
+        </div>
+    </div>
+
+    <main>
+        <div id="status">Refreshing every 1s… last update: --</div>
+        <div class="grid" id="grid"></div>
+    </main>
+
+<script>
+    const REFRESH_SECONDS = 1;
+    const TIMEFRAMES = ["M1", "M5", "M15", "M30", "H1", "H4"];
+    const countdownEl = document.getElementById("countdown");
+    const status = document.getElementById("status");
+    const grid = document.getElementById("grid");
+
+    // Clocks, live price, alert flash/buzz, alert & auto-trade toggle
+    // buttons -- all shared header behavior lives in header.js now (see
+    // core/_header.html), used identically on every page.
+
+    // ---- forex news ticker tape, refreshed every 5 min (matches backend cache) ----
+    const newsTrack = document.getElementById("newsTrack");
+
+    function escapeHtml(str) {
+        const div = document.createElement("div");
+        div.textContent = str;
+        return div.innerHTML;
+    }
+
+    function formatNewsTime(pubDate) {
+        if (!pubDate) return "";
+        const d = new Date(pubDate);
+        return isNaN(d) ? "" : d.toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: false });
+    }
+
+    async function refreshNews() {
+        try {
+            const res = await fetch("/api/news/");
+            const data = await res.json();
+            const headlines = data.headlines || [];
+            if (!headlines.length) {
+                newsTrack.innerHTML = `<span class="item">No XAUUSD/USD-relevant news right now</span>`;
+                return;
+            }
+            const itemsHtml = headlines.map(h => {
+                const title = escapeHtml(h.title);
+                const safeHref = /^https?:\/\//.test(h.link) ? h.link : "#";
+                const impact = ["high", "medium", "low"].includes(h.impact) ? h.impact : "low";
+                const time = formatNewsTime(h.pub_date);
+                return `<span class="item">
+                    <span class="impact impact-${impact}">${impact}</span>
+                    ${time ? `<span class="news-time">${time}</span>` : ""}
+                    <a href="${safeHref}" target="_blank" rel="noopener noreferrer">${title}</a>
+                </span><span class="dot">•</span>`;
+            }).join("");
+            // Duplicated so the 0%->-50% scroll animation loops seamlessly.
+            newsTrack.innerHTML = itemsHtml + itemsHtml;
+        } catch (err) {
+            newsTrack.innerHTML = `<span class="item">News unavailable</span>`;
+        }
+    }
+    refreshNews();
+    setInterval(refreshNews, 5 * 60 * 1000);
+
+    // ---- chart setup: one candlestick + supertrend line chart per timeframe ----
+    const charts = {};
+
+    function createPanel(timeframe) {
+        const panel = document.createElement("div");
+        panel.className = "panel";
+        panel.innerHTML = `
+            <div class="panel-header">
+                <h2>${timeframe}</h2>
+                <span class="trend-badge" id="badge-${timeframe}">--</span>
+            </div>
+            <div class="chart" id="chart-${timeframe}"></div>
+        `;
+        grid.appendChild(panel);
+
+        // Lightweight Charts formats its time axis in UTC by default, which
+        // doesn't match the header's NY/IST clocks. Force axis/crosshair
+        // labels into IST so the horizontal timeline agrees with "real time".
+        const chart = LightweightCharts.createChart(document.getElementById(`chart-${timeframe}`), {
+            layout: { background: { color: "#1a1d24" }, textColor: "#aaa" },
+            grid: { vertLines: { color: "#23262e" }, horzLines: { color: "#23262e" } },
+            timeScale: {
+                timeVisible: true,
+                secondsVisible: false,
+                tickMarkFormatter: (time, tickMarkType) => {
+                    const date = new Date(time * 1000);
+                    const opts = { timeZone: "Asia/Kolkata" };
+                    if (tickMarkType === 0) return date.toLocaleDateString("en-IN", { ...opts, year: "numeric" });
+                    if (tickMarkType === 1) return date.toLocaleDateString("en-IN", { ...opts, month: "short" });
+                    if (tickMarkType === 2) return date.toLocaleDateString("en-IN", { ...opts, day: "numeric" });
+                    return date.toLocaleTimeString("en-IN", { ...opts, hour: "2-digit", minute: "2-digit", hour12: false });
+                },
+            },
+            localization: {
+                timeFormatter: (time) => {
+                    const date = new Date(time * 1000);
+                    return date.toLocaleString("en-IN", {
+                        timeZone: "Asia/Kolkata", hour12: false,
+                        day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit",
+                    }) + " IST";
+                },
+            },
+            rightPriceScale: { borderColor: "#2a2e38" },
+            width: document.getElementById(`chart-${timeframe}`).clientWidth,
+            height: 260,
+        });
+
+        const candleSeries = chart.addCandlestickSeries({
+            upColor: "#4caf50", downColor: "#ef5350",
+            borderUpColor: "#4caf50", borderDownColor: "#ef5350",
+            wickUpColor: "#4caf50", wickDownColor: "#ef5350",
+        });
+
+        // Supertrend line/area series (rebuildSupertrendSeries) are created
+        // fresh per refresh, one pair per contiguous same-trend run.
+        // `segmentSeries` tracks the currently-live ones so they can be
+        // torn down before the next refresh draws new ones.
+        charts[timeframe] = { chart, candleSeries, segmentSeries: [] };
+
+        new ResizeObserver(entries => {
+            const { width } = entries[0].contentRect;
+            chart.applyOptions({ width });
+        }).observe(document.getElementById(`chart-${timeframe}`));
+    }
+
+    TIMEFRAMES.forEach(createPanel);
+
+    // Lightweight Charts (this vendored build) does NOT treat a {time}-only
+    // "whitespace" point as a gap for line/area series -- it interpolates
+    // straight through it regardless, which is what caused the red/green
+    // Supertrend lines to overlap across the whole chart. The reliable fix
+    // is to never share one series across a trend flip: split the data into
+    // contiguous same-trend runs and give each run its own line+area series,
+    // torn down and rebuilt every refresh.
+    function buildRuns(points) {
+        const runs = [];
+        for (const p of points) {
+            const last = runs[runs.length - 1];
+            if (last && last.trend === p.trend) {
+                last.points.push({ time: p.time_unix, value: p.value });
+            } else {
+                runs.push({ trend: p.trend, points: [{ time: p.time_unix, value: p.value }] });
+            }
+        }
+        return runs;
+    }
+
+    function rebuildSupertrendSeries(timeframe, supertrendPoints, candles) {
+        const entry = charts[timeframe];
+        entry.segmentSeries.forEach(s => entry.chart.removeSeries(s));
+        entry.segmentSeries = [];
+
+        // IMPORTANT (found via pixel-level testing): Lightweight Charts'
+        // `baseValue` gets clipped/ignored on an AreaSeries whose "value"
+        // data is flat (which Supertrend often is -- long ratchet
+        // plateaus) once many such series share overlapping-looking flat
+        // "value" data -- regardless of the chart's actual visible price
+        // range. Giving each CANDLE its own 2-point flat-value box (the
+        // previous approach) hit this exactly and silently failed to
+        // render for most candles in a plateau.
+        //
+        // Fix: group the run into contiguous segments where the Supertrend
+        // LINE value is genuinely constant (its natural plateaus), and for
+        // each segment use ONE Area series whose "value" is each candle's
+        // OWN high/low (a real, continuously-varying multi-point series --
+        // not a flat one), with baseValue set once to that segment's
+        // accurate (and, within the segment, truly constant) line value.
+        const candleByTime = new Map(candles.map(c => [c.time_unix, c]));
+
+        for (const run of buildRuns(supertrendPoints)) {
+            const isUp = run.trend === 1;
+            const fillColor = isUp ? "rgba(76,175,80,0.16)" : "rgba(239,83,80,0.16)";
+
+            const segments = [];
+            for (const p of run.points) {
+                const last = segments[segments.length - 1];
+                if (last && last.lineValue === p.value) {
+                    last.points.push(p);
+                } else {
+                    segments.push({ lineValue: p.value, points: [p] });
+                }
+            }
+
+            for (const seg of segments) {
+                // Fill only the actual gap between the line and price --
+                // stop at the candle's NEAR edge (its low for an uptrend
+                // support line, its high for a downtrend resistance line),
+                // not its far edge, which would push the fill through the
+                // candle's own body/wick instead of just the space between.
+                const boxPoints = seg.points
+                    .map(p => {
+                        const candle = candleByTime.get(p.time);
+                        if (!candle) return null;
+                        return { time: p.time, value: isUp ? candle.low : candle.high };
+                    })
+                    .filter(Boolean);
+                if (!boxPoints.length) continue;
+
+                const box = entry.chart.addAreaSeries({
+                    lineColor: "transparent",
+                    topColor: fillColor, bottomColor: fillColor,
+                    baseValue: { type: "price", price: seg.lineValue },
+                    priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+                });
+                box.setData(boxPoints);
+                entry.segmentSeries.push(box);
+            }
+
+            const line = entry.chart.addLineSeries({
+                color: isUp ? "#4caf50" : "#ef5350", lineWidth: 2,
+                lastValueVisible: false, priceLineVisible: false,
+            });
+            line.setData(run.points);
+
+            entry.segmentSeries.push(line);
+        }
+    }
+
+    // Strategy markers ($ sign, green/red). The source Pine script plots
+    // these with location=location.belowbar, which means Pine itself
+    // ignores the numeric TrendLine+-ATR value for *positioning* -- it's
+    // only used as the plot/na trigger -- and always renders fixed just
+    // below the bar. That's exactly what Lightweight Charts' native
+    // candlestick setMarkers() API does, so no custom series/z-order
+    // workaround is needed here.
+    // Generic over strategy name: adding a new strategy's markers means
+    // adding one more entry to STRATEGY_MARKER_STYLES, nothing else changes.
+    const STRATEGY_MARKER_STYLES = {
+        green_dollar: {
+            bull: { color: "#4caf50", position: "belowBar", shape: "circle", text: "$" },
+            bear: { color: "#ef5350", position: "belowBar", shape: "circle", text: "$" },
+        },
+        // Independent duplicate of green_dollar (own enable/disable, own
+        // RR) -- same $ marker shape, distinct color so the two are still
+        // visually separable on a shared chart.
+        greenDollar: {
+            bull: { color: "#00e676", position: "belowBar", shape: "circle", text: "$" },
+            bear: { color: "#ff1744", position: "belowBar", shape: "circle", text: "$" },
+        },
+        engulfing_consolidation_sell: {
+            // SELL-only pattern, evaluated on H1 and broadcast to every
+            // chart -- placed above the bar with an explicit "SELL" label
+            // so it reads as a distinct signal from the Green Dollar $ markers.
+            bear: { color: "#ff9800", position: "aboveBar", shape: "arrowDown", text: "SELL" },
+        },
+        triple_wick_rejection: {
+            bull: { color: "#4fc3f7", position: "belowBar", shape: "arrowUp", text: "TWR" },
+            bear: { color: "#ba68c8", position: "aboveBar", shape: "arrowDown", text: "TWR" },
+        },
+        moving_average: {
+            bull: { color: "#66bb6a", position: "belowBar", shape: "circle", text: "MA" },
+            bear: { color: "#e57373", position: "aboveBar", shape: "circle", text: "MA" },
+        },
+        engulfing_signal: {
+            bull: { color: "#81c784", position: "belowBar", shape: "arrowUp", text: "ENG" },
+            bear: { color: "#e57373", position: "aboveBar", shape: "arrowDown", text: "ENG" },
+        },
+        engulfing_reversal: {
+            bull: { color: "#4dd0e1", position: "belowBar", shape: "arrowUp", text: "REV" },
+            bear: { color: "#f06292", position: "aboveBar", shape: "arrowDown", text: "REV" },
+        },
+        engulfing_consolidation: {
+            bull: { color: "#aed581", position: "belowBar", shape: "arrowUp", text: "EC" },
+            bear: { color: "#ff8a65", position: "aboveBar", shape: "arrowDown", text: "EC" },
+        },
+        mark2: {
+            bull: { color: "#9575cd", position: "belowBar", shape: "arrowUp", text: "M2" },
+            bear: { color: "#f06292", position: "aboveBar", shape: "arrowDown", text: "M2" },
+        },
+        mark_dollar_supertrend: {
+            bull: { color: "#4db6ac", position: "belowBar", shape: "circle", text: "MDS" },
+            bear: { color: "#ff7043", position: "aboveBar", shape: "circle", text: "MDS" },
+        },
+    };
+
+    function buildChartMarkers(markersByStrategy) {
+        const markers = [];
+        for (const [strategyName, entries] of Object.entries(markersByStrategy || {})) {
+            const styles = STRATEGY_MARKER_STYLES[strategyName];
+            if (!styles) continue; // unknown strategy -- skip rather than guess a style
+
+            for (const m of entries) {
+                const style = m.direction === "bull" ? styles.bull : styles.bear;
+                if (!style) continue;
+                markers.push({
+                    time: m.time_unix,
+                    position: style.position,
+                    color: style.color,
+                    shape: style.shape,
+                    text: style.text,
+                });
+            }
+        }
+        return markers.sort((a, b) => a.time - b.time);
+    }
+
+    function updatePanel(timeframe, tfData) {
+        const badge = document.getElementById(`badge-${timeframe}`);
+        const { candleSeries } = charts[timeframe];
+
+        if (!tfData || tfData.candles.length === 0) {
+            badge.textContent = "no data";
+            badge.className = "trend-badge";
+            return;
+        }
+
+        candleSeries.setData(tfData.candles.map(c => {
+            const base = { time: c.time_unix, open: c.open, high: c.high, low: c.low, close: c.close };
+            if (c.engulfing === "bullish") {
+                // White body, green border: bullish engulfing
+                return { ...base, color: "#ffffff", borderColor: "#4caf50", wickColor: "#4caf50" };
+            }
+            if (c.engulfing === "bearish") {
+                // Black body, red border: bearish engulfing
+                return { ...base, color: "#000000", borderColor: "#ef5350", wickColor: "#ef5350" };
+            }
+            return base;
+        }));
+
+        rebuildSupertrendSeries(timeframe, tfData.supertrend, tfData.candles);
+        candleSeries.setMarkers(buildChartMarkers(tfData.markers));
+
+        badge.textContent = tfData.trend === "up" ? "▲ UP" : "▼ DOWN";
+        badge.className = "trend-badge " + (tfData.trend === "up" ? "up" : "down");
+    }
+
+    async function refresh() {
+        try {
+            const res = await fetch("/api/candles/");
+            const data = await res.json();
+
+            TIMEFRAMES.forEach(tf => updatePanel(tf, data.timeframes[tf]));
+            AppHeader.checkAlerts(data.alerts || []);
+
+            status.textContent = `Refreshing every ${REFRESH_SECONDS}s… last update: ${new Date().toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour12: false })}`;
+        } catch (err) {
+            status.textContent = `Refresh failed: ${err}`;
+        }
+    }
+
+    // ---- 15s countdown (drives the refresh, always shown in sync) ----
+    let secondsLeft = REFRESH_SECONDS;
+
+    function tickCountdown() {
+        secondsLeft -= 1;
+        if (secondsLeft <= 0) {
+            countdownEl.textContent = "refreshing…";
+            countdownEl.classList.add("due");
+            refresh().finally(() => {
+                secondsLeft = REFRESH_SECONDS;
+                countdownEl.classList.remove("due");
+            });
+        } else {
+            countdownEl.textContent = `next refresh: ${secondsLeft}s`;
+        }
+    }
+
+    const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
+
+    // ---- per-strategy enable/disable buttons. Backend is the source of
+    // truth: disabling a strategy here also stops its alerts, chart
+    // markers, and auto-trading (see StrategyToggleRegistry) -- this bar
+    // just renders/toggles whatever /api/strategies/ reports, so a new
+    // strategy registered on the backend shows up here automatically with
+    // no template change. ----
+    const strategyBar = document.getElementById("strategyBar");
+    const STRATEGY_LABELS = {
+        green_dollar: "Green Dollar",
+        greenDollar: "Green Dollar (Bull Only)",
+        triple_wick_rejection: "Triple Wick",
+        engulfing_consolidation_sell: "Engulf+Consol SELL",
+        supertrend_flip: "Supertrend Flip",
+        moving_average: "Moving Average",
+        engulfing_signal: "Engulfing",
+        engulfing_reversal: "Engulfing Reversal",
+        engulfing_consolidation: "Engulf+Consol",
+        mark2: "Mark2",
+        mark_dollar_supertrend: "Mark Dollar ST",
+        "20ema": "20 EMA",
+        engulf_volume_fade: "Engulf Volume Fade",
+    };
+
+    // ---- per-strategy R:R input, for strategies whose auto-trade SL/TP
+    // is runtime-configurable (see Ema20Strategy.set_rr and
+    // CandleService.list_strategy_rr/set_strategy_rr). A strategy simply
+    // not appearing in /api/strategies/rr/ means it has no adjustable RR
+    // and gets no input here -- same "backend is the source of truth"
+    // approach as the enable/disable buttons above. ----
+    let rrStates = {};
+
+    function makeRrInput(name, rr) {
+        const input = document.createElement("input");
+        input.type = "number";
+        input.step = "0.1";
+        input.min = "0.1";
+        input.className = "strategy-rr-input";
+        input.title = `${STRATEGY_LABELS[name] || name} R:R`;
+        input.value = rr;
+        input.addEventListener("change", async () => {
+            const value = parseFloat(input.value);
+            if (!(value > 0)) {
+                input.value = rrStates[name];
+                return;
+            }
+            try {
+                const res = await fetch("/api/strategies/rr/set/", {
+                    method: "POST",
+                    headers: { "X-CSRFToken": csrfToken, "Content-Type": "application/json" },
+                    body: JSON.stringify({ name, rr: value }),
+                });
+                const data = await res.json();
+                if (data.rr !== undefined) {
+                    rrStates[name] = data.rr;
+                    input.value = data.rr;
+                } else {
+                    input.value = rrStates[name];
+                }
+            } catch (err) {
+                input.value = rrStates[name];
+            }
+        });
+        return input;
+    }
+
+    // ---- per-strategy Supertrend-direction confirmation checkbox, for
+    // strategies that support it (see Ema20Strategy.set_supertrend_filter
+    // and CandleService.list_strategy_supertrend_filter). When checked,
+    // that strategy only fires BUY while Supertrend is bullish (green) and
+    // only SELL while it's bearish (red). Same "not in the API response =
+    // no control shown" convention as the RR input above. ----
+    let supertrendFilterStates = {};
+
+    function makeSupertrendFilterToggle(name, enabled) {
+        const label = document.createElement("label");
+        label.className = "strategy-st-filter";
+        label.title = `${STRATEGY_LABELS[name] || name}: only BUY while Supertrend is bullish, only SELL while bearish`;
+
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.checked = enabled;
+        checkbox.addEventListener("change", async () => {
+            const value = checkbox.checked;
+            try {
+                const res = await fetch("/api/strategies/supertrend-filter/set/", {
+                    method: "POST",
+                    headers: { "X-CSRFToken": csrfToken, "Content-Type": "application/json" },
+                    body: JSON.stringify({ name, enabled: value }),
+                });
+                const data = await res.json();
+                if (data.supertrend_filter !== undefined) {
+                    supertrendFilterStates[name] = data.supertrend_filter;
+                    checkbox.checked = data.supertrend_filter;
+                } else {
+                    checkbox.checked = supertrendFilterStates[name];
+                }
+            } catch (err) {
+                checkbox.checked = supertrendFilterStates[name];
+            }
+        });
+
+        label.appendChild(checkbox);
+        label.appendChild(document.createTextNode(" ST"));
+        return label;
+    }
+
+    function renderStrategyButtons(states) {
+        strategyBar.querySelectorAll(".strategy-btn, .strategy-rr-input, .strategy-st-filter").forEach(el => el.remove());
+        Object.entries(states).forEach(([name, enabled]) => {
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = `strategy-btn ${enabled ? "on" : "off"}`;
+            btn.textContent = STRATEGY_LABELS[name] || name;
+            btn.addEventListener("click", async () => {
+                try {
+                    const res = await fetch("/api/strategies/toggle/", {
+                        method: "POST",
+                        headers: { "X-CSRFToken": csrfToken, "Content-Type": "application/json" },
+                        body: JSON.stringify({ name }),
+                    });
+                    const data = await res.json();
+                    if (data.enabled !== undefined) {
+                        btn.className = `strategy-btn ${data.enabled ? "on" : "off"}`;
+                    }
+                } catch (err) {}
+            });
+            strategyBar.appendChild(btn);
+            if (Object.prototype.hasOwnProperty.call(rrStates, name)) {
+                strategyBar.appendChild(makeRrInput(name, rrStates[name]));
+            }
+            if (Object.prototype.hasOwnProperty.call(supertrendFilterStates, name)) {
+                strategyBar.appendChild(makeSupertrendFilterToggle(name, supertrendFilterStates[name]));
+            }
+        });
+    }
+
+    async function refreshStrategies() {
+        try {
+            const [statesRes, rrRes, stFilterRes] = await Promise.all([
+                fetch("/api/strategies/"),
+                fetch("/api/strategies/rr/"),
+                fetch("/api/strategies/supertrend-filter/"),
+            ]);
+            const statesData = await statesRes.json();
+            const rrData = await rrRes.json();
+            const stFilterData = await stFilterRes.json();
+            rrStates = rrData.rr || {};
+            supertrendFilterStates = stFilterData.supertrend_filter || {};
+            renderStrategyButtons(statesData.strategies || {});
+        } catch (err) {}
+    }
+    refreshStrategies();
+
+    // Auto Trade toggle button lives in the shared header now (header.js) --
+    // same backend endpoint, works identically from every page.
+
+    refresh();
+    setInterval(tickCountdown, 1000);
+</script>
+</body>
+</html>

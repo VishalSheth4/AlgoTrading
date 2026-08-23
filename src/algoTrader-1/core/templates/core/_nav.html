@@ -1,0 +1,8 @@
+<nav class="app-nav">
+    <span class="brand"><span class="dot"></span>algoTrader</span>
+    <a href="{% url 'candles_page' %}" class="{% if active_tab == 'dashboard' %}active{% endif %}">Dashboard</a>
+    <a href="{% url 'full_chart_page' %}" class="{% if active_tab == 'chart' %}active{% endif %}">XAUUSD Chart</a>
+    <a href="{% url 'backtest_page' %}" class="{% if active_tab == 'backtest' %}active{% endif %}">Backtest</a>
+    <a href="{% url 'settings_page' %}" class="{% if active_tab == 'settings' %}active{% endif %}">Settings</a>
+    <a href="/nse/" class="{% if active_tab == 'nse' %}active{% endif %}">NSE Signals</a>
+</nav>

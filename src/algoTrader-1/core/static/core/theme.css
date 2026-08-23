@@ -1,0 +1,183 @@
+/*
+Shared design system for every algoTrader page -- Apple-style dark UI:
+true black surfaces, SF-Pro-like type, a single accent blue, soft
+translucent borders, and a blurred sticky top nav that looks the same
+everywhere. Included on every page alongside that page's own CSS -- this
+file only owns global tokens, body defaults, and the shared nav bar, so it
+never fights with a page's own component styles.
+*/
+
+:root {
+  --bg: #000000;
+  --surface: #111113;
+  --surface-2: #1c1c1e;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.14);
+  --text: #f5f5f7;
+  --text-dim: #86868b;
+  --text-faint: #48484a;
+  --accent: #0a84ff;
+  --accent-dim: rgba(10, 132, 255, 0.14);
+  --green: #30d158;
+  --red: #ff453a;
+  --amber: #ff9f0a;
+  --radius: 12px;
+  --radius-sm: 8px;
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
+    "Segoe UI", Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+a { color: inherit; }
+
+/* ── Shared top nav (core/_nav.html) ─────────────────────────────── */
+.app-nav {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 24px;
+  height: 52px;
+  background: rgba(17, 17, 19, 0.72);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border-bottom: 1px solid var(--border);
+}
+.app-nav .brand {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  margin-right: 20px;
+  white-space: nowrap;
+}
+.app-nav .brand .dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+  margin-right: 8px;
+  box-shadow: 0 0 6px rgba(48, 209, 88, 0.6);
+}
+.app-nav a {
+  position: relative;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-dim);
+  text-decoration: none;
+  border-radius: 980px;
+  transition: color 0.2s var(--ease), background 0.2s var(--ease);
+  white-space: nowrap;
+}
+.app-nav a:hover { color: var(--text); background: rgba(255, 255, 255, 0.06); }
+.app-nav a.active { color: var(--bg); background: var(--text); font-weight: 600; }
+
+/* ── Shared button language -- apply alongside a page's own button rules ── */
+.ap-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 980px;
+  cursor: pointer;
+  transition: background 0.2s var(--ease), border-color 0.2s var(--ease), transform 0.1s var(--ease);
+}
+.ap-btn:hover { background: #2c2c2e; border-color: var(--border-strong); }
+.ap-btn:active { transform: scale(0.97); }
+.ap-btn-accent { background: var(--accent); border-color: var(--accent); color: #fff; }
+.ap-btn-accent:hover { background: #2b95ff; }
+.ap-btn-danger { background: rgba(255, 69, 58, 0.14); border-color: rgba(255, 69, 58, 0.4); color: var(--red); }
+.ap-btn-danger:hover { background: rgba(255, 69, 58, 0.22); }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--surface-2); border-radius: 8px; }
+::-webkit-scrollbar-thumb:hover { background: #3a3a3c; }
+
+/* ── Shared page header (core/_header.html + header.js) --------------
+   Used identically on every page: NY/IST clocks, live bid/ask, the
+   alert/auto-trade controls, and the flash-on-alert effect. Sticky right
+   below .app-nav so scrolling never separates the two. */
+header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 24px; background: rgba(17, 17, 19, 0.86);
+  backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border-bottom: 1px solid var(--border);
+  position: sticky; top: 52px; z-index: 10;
+}
+header.flash-bullish { animation: headerFlashGreen 0.6s ease-in-out 3; }
+header.flash-bearish { animation: headerFlashRed 0.6s ease-in-out 3; }
+@keyframes headerFlashGreen { 0%, 100% { background: rgba(17, 17, 19, 0.86); } 50% { background: rgba(48, 209, 88, 0.22); } }
+@keyframes headerFlashRed   { 0%, 100% { background: rgba(17, 17, 19, 0.86); } 50% { background: rgba(255, 69, 58, 0.22); } }
+
+/* Whole-UI flash: a fixed full-viewport tint, not a popup/modal -- the
+   underlying page stays visible and usable. */
+#alertOverlay { position: fixed; inset: 0; z-index: 5; pointer-events: none; background: transparent; }
+#alertOverlay.flash-bullish { animation: overlayFlashGreen 0.6s ease-in-out 3; }
+#alertOverlay.flash-bearish { animation: overlayFlashRed 0.6s ease-in-out 3; }
+@keyframes overlayFlashGreen { 0%, 100% { background: transparent; } 50% { background: rgba(48, 209, 88, 0.18); } }
+@keyframes overlayFlashRed   { 0%, 100% { background: transparent; } 50% { background: rgba(255, 69, 58, 0.18); } }
+
+.left-header { display: flex; align-items: center; gap: 16px; min-width: 160px; }
+.clock-block { display: flex; align-items: baseline; gap: 5px; font-variant-numeric: tabular-nums; }
+.clock-tz { font-size: 10px; font-weight: 600; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.04em; }
+#clockNY, #clockIST { font-size: 14px; color: var(--text); font-variant-numeric: tabular-nums; }
+#countdown {
+  font-size: 11px; font-variant-numeric: tabular-nums; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 980px; padding: 3px 10px;
+}
+#countdown.due { color: var(--amber); border-color: var(--amber); }
+#liveBadge {
+  font-size: 11px; font-weight: 600; color: var(--red); border: 1px solid var(--red); border-radius: 980px;
+  padding: 3px 10px; animation: livePulse 1.4s ease-in-out infinite;
+}
+@keyframes livePulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+.title { font-size: 14px; font-weight: 600; color: var(--text); text-align: center; flex: 1; letter-spacing: -0.01em; }
+.right-header { display: flex; align-items: center; gap: 14px; min-width: 110px; justify-content: flex-end; }
+#livePrice { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--text); white-space: nowrap; }
+#livePrice .bid { color: var(--red); }
+#livePrice .ask { color: var(--green); }
+#livePrice .sep { color: var(--text-faint); font-weight: 400; margin: 0 4px; }
+
+/* Persistent "latest change" label -- shows just the single most recent
+   alert and stays put until the next one replaces it. */
+#latestChange {
+  font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 980px;
+  border: 1px solid var(--border); color: var(--text-dim); white-space: nowrap;
+}
+#latestChange.bullish { background: rgba(48, 209, 88, 0.14); color: var(--green); border-color: rgba(48, 209, 88, 0.4); }
+#latestChange.bearish { background: rgba(255, 69, 58, 0.14); color: var(--red); border-color: rgba(255, 69, 58, 0.4); }
+
+#testAlertBtn, #alertToggleBtn, #autoTradeToggleBtn {
+  background: var(--surface-2); color: var(--text); border: 1px solid var(--border); border-radius: 980px;
+  padding: 6px 14px; font-size: 12px; font-weight: 500; cursor: pointer; white-space: nowrap;
+  transition: background 0.2s var(--ease), border-color 0.2s var(--ease);
+}
+#testAlertBtn:hover, #alertToggleBtn:hover, #autoTradeToggleBtn:hover { background: #2c2c2e; border-color: var(--border-strong); }
+#alertToggleBtn.off { color: var(--text-faint); border-color: var(--border); }
+/* Auto Trade places REAL orders once on -- deliberately loud/pulsing so
+   it's never mistaken for a purely cosmetic toggle like the others. */
+#autoTradeToggleBtn.live {
+  background: var(--red); color: #fff; border-color: var(--red);
+  animation: autoTradeLivePulse 1.2s ease-in-out infinite;
+}
+@keyframes autoTradeLivePulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.65; } }

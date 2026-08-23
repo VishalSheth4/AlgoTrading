@@ -1,0 +1,245 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>NSE Signals - NIFTY 50</title>
+<style>
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, Segoe UI, Arial, sans-serif; background: #0f1115; color: #e6e6e6; margin: 0; }
+
+    header {
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 10px 20px; background: #14161c; border-bottom: 1px solid #2a2e38;
+        position: sticky; top: 0; z-index: 10;
+    }
+    .title { font-size: 16px; color: #ccc; }
+    .subtitle { font-size: 12px; color: #777; margin-top: 2px; }
+    #status { font-size: 12px; color: #888; }
+    #status.warming { color: #ffb74d; }
+
+    .filter-bar {
+        display: flex; gap: 24px; flex-wrap: wrap; align-items: center;
+        padding: 14px 20px; background: #14161c; border-bottom: 1px solid #2a2e38;
+    }
+    .filter-group { display: flex; align-items: center; gap: 10px; }
+    .filter-group-label { font-size: 11px; font-weight: 700; color: #777; text-transform: uppercase; letter-spacing: 0.05em; }
+    .filter-chip {
+        display: inline-flex; align-items: center; gap: 6px;
+        background: #1a1d24; color: #ccc; border: 1px solid #2a2e38; border-radius: 6px;
+        padding: 5px 12px; font-size: 12px; cursor: pointer; user-select: none;
+    }
+    .filter-chip:hover { background: #23262e; }
+    .filter-chip.active { border-color: #4fc3f7; color: #4fc3f7; }
+
+    main { padding: 20px; }
+    table { width: 100%; border-collapse: collapse; background: #1a1d24; border: 1px solid #2a2e38; border-radius: 8px; overflow: hidden; }
+    thead th {
+        text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+        color: #777; padding: 10px 16px; border-bottom: 1px solid #2a2e38; background: #14161c;
+    }
+    tbody td { padding: 10px 16px; font-size: 13px; border-bottom: 1px solid #23262e; }
+    tbody tr:last-child td { border-bottom: none; }
+    tbody tr:hover { background: #20232b; }
+
+    .symbol { font-weight: 700; color: #e6e6e6; }
+    .signal-badge { font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 12px; text-transform: uppercase; }
+    .signal-badge.buy { background: #143d20; color: #4caf50; }
+    .signal-badge.sell { background: #401414; color: #ef5350; }
+    .strategy-badge { font-size: 11px; color: #888; background: #23262e; padding: 3px 8px; border-radius: 6px; }
+    .tf-badge { font-size: 11px; color: #4fc3f7; font-weight: 600; }
+    .row-time { color: #888; font-variant-numeric: tabular-nums; font-size: 12px; }
+
+    /* New-row highlight: a brief colored flash that fades back to normal,
+       so freshly detected signals are obvious without staying visually
+       "stuck" highlighted forever. */
+    tr.row-new { animation: rowFlash 2.5s ease-out; }
+    tr.row-new.buy { animation-name: rowFlashBuy; }
+    tr.row-new.sell { animation-name: rowFlashSell; }
+    @keyframes rowFlashBuy { 0% { background: rgba(76,175,80,0.35); } 100% { background: transparent; } }
+    @keyframes rowFlashSell { 0% { background: rgba(239,83,80,0.35); } 100% { background: transparent; } }
+
+    .empty-state { text-align: center; color: #777; padding: 60px 0; font-size: 13px; }
+</style>
+</head>
+<body>
+    <audio id="buzzSound" src="{% static 'nse/small_buzz.wav' %}" preload="auto"></audio>
+
+    <header>
+        <div>
+            <div class="title">NSE Signals</div>
+            <div class="subtitle">NIFTY 50 &middot; Supertrend Flip</div>
+        </div>
+        <div style="display:flex; align-items:center; gap:20px;">
+            <a href="/" style="color:#4fc3f7; text-decoration:none; font-size:13px;">&larr; XAUUSD Dashboard</a>
+            <div id="status">Starting…</div>
+        </div>
+    </header>
+
+    <div class="filter-bar">
+        <div class="filter-group">
+            <span class="filter-group-label">Timeframe</span>
+            <div id="timeframeFilters"></div>
+        </div>
+        <div class="filter-group">
+            <span class="filter-group-label">Strategy</span>
+            <div id="strategyFilters"></div>
+        </div>
+        <div class="filter-group">
+            <span class="filter-group-label">Signal</span>
+            <div id="signalFilters"></div>
+        </div>
+    </div>
+
+    <main>
+        <table>
+            <thead>
+                <tr>
+                    <th>Stock</th>
+                    <th>Strategy</th>
+                    <th>Signal</th>
+                    <th>Timeframe</th>
+                    <th>Time</th>
+                </tr>
+            </thead>
+            <tbody id="signalRows"></tbody>
+        </table>
+        <div class="empty-state" id="emptyState" style="display:none;">No signals matching the current filters yet.</div>
+    </main>
+
+<script>
+    const REFRESH_MS = 60 * 1000; // 1 minute, per the requested NSE refresh rate
+
+    // ---- Generic filter config -- adding a new timeframe or strategy
+    // later means adding one entry here, nothing else in this file changes. ----
+    const TIMEFRAMES = [
+        { value: "15m", label: "15m" },
+        { value: "1h", label: "1H" },
+        { value: "4h", label: "4H" },
+        { value: "1d", label: "1D" },
+        { value: "1w", label: "1W" },
+    ];
+    const STRATEGIES = [
+        { value: "supertrend_flip", label: "Supertrend Flip" },
+    ];
+    const SIGNALS = [
+        { value: "buy", label: "Buy" },
+        { value: "sell", label: "Sell" },
+    ];
+
+    const activeTimeframes = new Set(TIMEFRAMES.map(t => t.value));
+    const activeStrategies = new Set(STRATEGIES.map(s => s.value));
+    const activeSignals = new Set(SIGNALS.map(s => s.value));
+
+    function buildFilterChips(containerId, options, activeSet) {
+        const container = document.getElementById(containerId);
+        options.forEach(opt => {
+            const chip = document.createElement("span");
+            chip.className = "filter-chip active";
+            chip.textContent = opt.label;
+            chip.dataset.value = opt.value;
+            chip.addEventListener("click", () => {
+                if (activeSet.has(opt.value)) {
+                    activeSet.delete(opt.value);
+                    chip.classList.remove("active");
+                } else {
+                    activeSet.add(opt.value);
+                    chip.classList.add("active");
+                }
+                renderTable(lastSignals);
+            });
+            container.appendChild(chip);
+        });
+    }
+    buildFilterChips("timeframeFilters", TIMEFRAMES, activeTimeframes);
+    buildFilterChips("strategyFilters", STRATEGIES, activeStrategies);
+    buildFilterChips("signalFilters", SIGNALS, activeSignals);
+
+    // ---- buzz sound (small, single blip -- distinct from the XAUUSD
+    // dashboard's heavier alarm) ----
+    const buzzEl = document.getElementById("buzzSound");
+    function playBuzz() {
+        try {
+            buzzEl.currentTime = 0;
+            const p = buzzEl.play();
+            if (p && p.catch) p.catch(() => {});
+        } catch (err) {}
+    }
+
+    const STRATEGY_LABELS = Object.fromEntries(STRATEGIES.map(s => [s.value, s.label]));
+    const TIMEFRAME_LABELS = Object.fromEntries(TIMEFRAMES.map(t => [t.value, t.label]));
+
+    function rowKey(row) {
+        return `${row.symbol}:${row.timeframe}:${row.strategy}:${row.detected_at_unix}`;
+    }
+
+    let knownRowKeys = new Set();
+    let lastSignals = [];
+    let firstLoad = true;
+
+    function renderTable(signals) {
+        const tbody = document.getElementById("signalRows");
+        const emptyState = document.getElementById("emptyState");
+
+        const filtered = signals.filter(row =>
+            activeTimeframes.has(row.timeframe) &&
+            activeStrategies.has(row.strategy) &&
+            activeSignals.has(row.signal)
+        );
+
+        if (!filtered.length) {
+            tbody.innerHTML = "";
+            emptyState.style.display = "block";
+            return;
+        }
+        emptyState.style.display = "none";
+
+        tbody.innerHTML = filtered.map(row => {
+            const isNew = !firstLoad && !knownRowKeys.has(rowKey(row));
+            const time = new Date(row.detected_at_unix * 1000).toLocaleString([], {
+                dateStyle: "short", timeStyle: "short",
+            });
+            return `<tr class="${isNew ? `row-new ${row.signal}` : ""}">
+                <td class="symbol">${row.symbol}</td>
+                <td><span class="strategy-badge">${STRATEGY_LABELS[row.strategy] || row.strategy}</span></td>
+                <td><span class="signal-badge ${row.signal}">${row.signal}</span></td>
+                <td><span class="tf-badge">${TIMEFRAME_LABELS[row.timeframe] || row.timeframe}</span></td>
+                <td class="row-time">${time}</td>
+            </tr>`;
+        }).join("");
+    }
+
+    async function refresh() {
+        try {
+            const res = await fetch("/nse/api/signals/");
+            const data = await res.json();
+            const signals = data.signals || [];
+
+            const newKeys = signals.map(rowKey).filter(k => !knownRowKeys.has(k));
+            if (!firstLoad && newKeys.length > 0) {
+                playBuzz();
+            }
+
+            lastSignals = signals;
+            renderTable(signals);
+            knownRowKeys = new Set(signals.map(rowKey));
+            firstLoad = false;
+
+            const statusEl = document.getElementById("status");
+            if (!data.first_cycle_done) {
+                statusEl.textContent = `Scanning NIFTY 50 for the first time… (${signals.length} signals so far)`;
+                statusEl.classList.add("warming");
+            } else {
+                statusEl.textContent = `${signals.length} signals · last updated ${new Date().toLocaleTimeString()}`;
+                statusEl.classList.remove("warming");
+            }
+        } catch (err) {
+            document.getElementById("status").textContent = "Refresh failed: " + err;
+        }
+    }
+
+    refresh();
+    setInterval(refresh, REFRESH_MS);
+</script>
+</body>
+</html>

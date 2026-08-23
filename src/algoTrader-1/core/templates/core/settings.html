@@ -1,0 +1,396 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="csrf-token" content="{{ csrf_token }}">
+<title>Settings — Trading Dashboard</title>
+<link rel="stylesheet" href="{% static 'core/theme.css' %}">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:#000;color:#c9d1d9;font-family:'Segoe UI',system-ui,-apple-system,sans-serif;min-height:100vh}
+
+.terminal-bar{background:#0d1117;border-bottom:2px solid #d29922;padding:0 20px;display:flex;align-items:center;height:34px;gap:0}
+.tb-brand{font-size:11px;font-weight:900;letter-spacing:.18em;color:#d29922;font-family:'Courier New',monospace}
+
+.page-wrap{padding:18px 22px 60px;max-width:900px;margin:0 auto}
+.page-title{font-size:16px;font-weight:700;color:#e6edf3;margin-bottom:4px}
+.page-sub{font-size:12px;color:#6e7681;margin-bottom:22px}
+
+.settings-card{background:#0d1117;border:1px solid #1c2332;border-radius:6px;padding:6px 20px;margin-bottom:20px}
+.field-row{display:flex;align-items:center;gap:16px;padding:16px 0;border-bottom:1px solid #161b22}
+.field-row:last-child{border-bottom:none}
+.field-label{flex:0 0 220px}
+.field-name{font-size:13px;color:#e6edf3;font-weight:600;display:flex;align-items:center;gap:8px}
+.field-help{font-size:11px;color:#6e7681;margin-top:3px;line-height:1.4}
+.field-input{flex:1;display:flex;justify-content:flex-end}
+.field-input input[type="text"], .field-input input[type="number"], .field-input select{
+  background:#090b0f;color:#e6edf3;border:1px solid #2a2e38;border-radius:5px;
+  padding:8px 12px;font-size:13px;font-family:'Courier New',monospace;width:220px;text-align:right;
+  transition:border-color .15s;
+}
+.field-input select{text-align:left;font-family:inherit;cursor:pointer}
+.field-input input:focus, .field-input select:focus{outline:none;border-color:#4fc3f7}
+.override-badge{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#d29922;background:rgba(210,153,34,.12);border:1px solid rgba(210,153,34,.35);border-radius:8px;padding:1px 7px}
+
+.actions-bar{display:flex;align-items:center;gap:10px;margin-top:4px}
+.btn-save{background:#143d20;color:#3fb950;border:1px solid #2e7d32;border-radius:6px;padding:10px 22px;font-size:13px;font-weight:700;cursor:pointer}
+.btn-save:hover{background:#1a4d29}
+.btn-save:disabled{opacity:.5;cursor:not-allowed}
+.btn-reset{background:#1a1d24;color:#888;border:1px solid #2a2e38;border-radius:6px;padding:10px 18px;font-size:13px;cursor:pointer}
+.btn-reset:hover{background:#23262e;color:#ccc}
+.save-status{font-size:12px;color:#6e7681}
+.save-status.ok{color:#3fb950}
+.save-status.err{color:#ef5350}
+
+.note-box{background:#14161c;border:1px solid #2a2e38;border-radius:6px;padding:14px 18px;font-size:12px;color:#888;line-height:1.6;margin-top:20px}
+.note-box code{background:#090b0f;border:1px solid #1c2332;border-radius:3px;padding:1px 6px;color:#d29922;font-family:'Courier New',monospace}
+
+.section-title{font-size:16px;font-weight:700;color:#e6edf3;margin:36px 0 4px}
+.rr-table-wrap{overflow-x:auto}
+.rr-table{width:100%;border-collapse:collapse;font-size:12px}
+.rr-table th{padding:10px;text-align:center;font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:#6e7681;border-bottom:1px solid #1c2332;white-space:nowrap}
+.rr-table th:first-child{text-align:left}
+.rr-table td{padding:6px;border-bottom:1px solid #161b22;text-align:center}
+.rr-table td:first-child{text-align:left;font-size:12px;color:#e6edf3;font-weight:600;white-space:nowrap;padding-left:4px}
+.rr-table tr:last-child td{border-bottom:none}
+.rr-table input{width:60px;background:#090b0f;color:#e6edf3;border:1px solid #2a2e38;border-radius:5px;padding:5px 4px;font-size:12px;font-family:'Courier New',monospace;text-align:center;transition:border-color .15s}
+.rr-table input:focus{outline:none;border-color:#4fc3f7}
+.rr-table input.dirty{border-color:#d29922;color:#d29922}
+</style>
+</head>
+<body>
+
+{% include 'core/_nav.html' %}
+{% include 'core/_header.html' %}
+
+<div class="terminal-bar"><span class="tb-brand">ALGO · SETTINGS</span></div>
+
+<div class="page-wrap">
+  <div class="page-title">Backtest &amp; Strategy Properties</div>
+  <div class="page-sub">Edits are saved to <code style="color:#6e7681">algoTrading/config_overrides.json</code> and apply to every backtest run from here on — no server restart needed.</div>
+
+  <div class="settings-card" id="fieldsContainer"></div>
+
+  <div class="actions-bar">
+    <button class="btn-save" id="saveBtn" type="button">Save Changes</button>
+    <button class="btn-reset" id="resetBtn" type="button">Reset All to Defaults</button>
+    <span class="save-status" id="saveStatus"></span>
+  </div>
+
+  <div class="note-box">
+    These are algoTrading's backtest/strategy tuning knobs (symbol, timeframe, risk, RR, TP mode, etc.) —
+    the properties that shape what a backtest run actually does. algoTrader's own live-dashboard tunables
+    (Supertrend period, auto-trade lot size/SL/TP, display bar counts) are currently environment-variable-only
+    and require a server restart to change; they aren't wired into this page yet.
+  </div>
+
+  <div class="section-title">Risk : Reward Matrix</div>
+  <div class="page-sub">
+    TP target as a multiple of risk (e.g. <code style="color:#6e7681">2</code> = 1:2) for each strategy on each
+    timeframe. Any cell left at <b>1</b> uses the 1:1 default — every combination starts here.
+    Only used when TP mode is "rr" or "both" (see the TP mode field above).
+  </div>
+
+  <div class="settings-card rr-table-wrap" id="rrMatrixContainer" style="padding:16px 20px"></div>
+
+  <div class="actions-bar">
+    <button class="btn-save" id="rrSaveBtn" type="button">Save RR Matrix</button>
+    <button class="btn-reset" id="rrResetBtn" type="button">Reset All to 1:1</button>
+    <span class="save-status" id="rrSaveStatus"></span>
+  </div>
+</div>
+
+<script>
+const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
+const fieldsContainer = document.getElementById('fieldsContainer');
+const saveBtn = document.getElementById('saveBtn');
+const resetBtn = document.getElementById('resetBtn');
+const saveStatusEl = document.getElementById('saveStatus');
+
+let currentSettings = null;
+const dirtyValues = {};
+
+function inputHtml(field, value) {
+  const id = 'field_' + field.name;
+  if (field.type === 'select_tf') {
+    const opts = (currentSettings.available_timeframes || []).map(tf =>
+      `<option value="${tf}" ${tf === value ? 'selected' : ''}>${tf}</option>`).join('');
+    return `<select id="${id}">${opts}</select>`;
+  }
+  if (field.type === 'select_tp') {
+    const opts = (currentSettings.available_tp_modes || []).map(m =>
+      `<option value="${m}" ${m === value ? 'selected' : ''}>${m}</option>`).join('');
+    return `<select id="${id}">${opts}</select>`;
+  }
+  if (field.type === 'select_risk_mode') {
+    const opts = ['percent', 'fixed'].map(m =>
+      `<option value="${m}" ${m === value ? 'selected' : ''}>${m === 'fixed' ? 'fixed ($ per trade)' : 'percent (% of capital)'}</option>`).join('');
+    return `<select id="${id}">${opts}</select>`;
+  }
+  if (field.type === 'int' || field.type === 'optional_int') {
+    return `<input type="number" step="1" id="${id}" value="${value === null || value === undefined ? '' : value}">`;
+  }
+  if (field.type === 'float') {
+    return `<input type="number" step="any" id="${id}" value="${value === null || value === undefined ? '' : value}">`;
+  }
+  if (field.type === 'bool') {
+    return `<input type="checkbox" id="${id}" ${value ? 'checked' : ''}>`;
+  }
+  return `<input type="text" id="${id}" value="${value === null || value === undefined ? '' : value}">`;
+}
+
+function renderFields() {
+  const overrideSet = new Set(currentSettings.overrides_active || []);
+  fieldsContainer.innerHTML = currentSettings.fields.map(field => {
+    const value = currentSettings.values[field.name];
+    const badge = overrideSet.has(field.name) ? '<span class="override-badge">Overridden</span>' : '';
+    return `
+      <div class="field-row">
+        <div class="field-label">
+          <div class="field-name">${field.label} ${badge}</div>
+          ${field.help ? `<div class="field-help">${field.help}</div>` : ''}
+        </div>
+        <div class="field-input">${inputHtml(field, value)}</div>
+      </div>`;
+  }).join('');
+
+  currentSettings.fields.forEach(field => {
+    const el = document.getElementById('field_' + field.name);
+    el.addEventListener(field.type === 'bool' ? 'change' : 'input', () => {
+      let raw = field.type === 'bool' ? el.checked : el.value;
+      if (field.type === 'optional_int' && raw.trim() === '') raw = null;
+      dirtyValues[field.name] = raw;
+      saveStatusEl.textContent = '';
+      saveStatusEl.className = 'save-status';
+    });
+  });
+}
+
+async function loadSettings() {
+  try {
+    const res = await fetch('/api/settings/');
+    currentSettings = await res.json();
+    renderFields();
+  } catch (err) {
+    fieldsContainer.innerHTML = '<div style="padding:20px;color:#ef5350">Failed to load settings: ' + err + '</div>';
+  }
+}
+
+function castValue(field, raw) {
+  if (raw === null) return null;
+  if (field.type === 'int' || field.type === 'optional_int') {
+    if (raw === '') return null;
+    const n = parseInt(raw, 10);
+    return Number.isNaN(n) ? raw : n; // let the backend reject non-numeric strings with a real error
+  }
+  if (field.type === 'float') {
+    const n = parseFloat(raw);
+    return Number.isNaN(n) ? raw : n;
+  }
+  if (field.type === 'bool') {
+    return Boolean(raw);
+  }
+  return raw;
+}
+
+saveBtn.addEventListener('click', async () => {
+  if (!Object.keys(dirtyValues).length) {
+    saveStatusEl.textContent = 'No changes to save.';
+    saveStatusEl.className = 'save-status';
+    return;
+  }
+  const fieldByName = Object.fromEntries(currentSettings.fields.map(f => [f.name, f]));
+  const values = {};
+  Object.entries(dirtyValues).forEach(([name, raw]) => {
+    values[name] = castValue(fieldByName[name], raw);
+  });
+
+  saveBtn.disabled = true;
+  saveStatusEl.textContent = 'Saving…';
+  saveStatusEl.className = 'save-status';
+  try {
+    const res = await fetch('/api/settings/save/', {
+      method: 'POST',
+      headers: { 'X-CSRFToken': csrfToken, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ values }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      saveStatusEl.textContent = data.error || 'Save failed.';
+      saveStatusEl.className = 'save-status err';
+      return;
+    }
+    currentSettings = data;
+    for (const k in dirtyValues) delete dirtyValues[k];
+    renderFields();
+    saveStatusEl.textContent = 'Saved.';
+    saveStatusEl.className = 'save-status ok';
+  } catch (err) {
+    saveStatusEl.textContent = 'Save failed: ' + err;
+    saveStatusEl.className = 'save-status err';
+  } finally {
+    saveBtn.disabled = false;
+  }
+});
+
+resetBtn.addEventListener('click', async () => {
+  if (!confirm('Reset every backtest property back to config.py\'s hardcoded defaults?')) return;
+  try {
+    const res = await fetch('/api/settings/reset/', {
+      method: 'POST',
+      headers: { 'X-CSRFToken': csrfToken },
+    });
+    currentSettings = await res.json();
+    for (const k in dirtyValues) delete dirtyValues[k];
+    renderFields();
+    saveStatusEl.textContent = 'Reset to defaults.';
+    saveStatusEl.className = 'save-status ok';
+  } catch (err) {
+    saveStatusEl.textContent = 'Reset failed: ' + err;
+    saveStatusEl.className = 'save-status err';
+  }
+});
+
+loadSettings();
+
+// ---------------------------------------------------------------------
+// Risk:Reward matrix -- one editable cell per (strategy, timeframe) pair.
+// Only dirty cells are sent on save (settings_service.py merges them onto
+// whatever's already stored, so untouched cells are never disturbed).
+// ---------------------------------------------------------------------
+const STRATEGY_LABELS = {
+  engulfing: 'Engulfing',
+  green_dollar: 'Green Dollar',
+  greenDollar: 'Green Dollar (Bull Only)',
+  ma: 'Moving Average',
+  supertrend: 'Supertrend',
+  engulfing_consolidation: 'Engulfing+Consolidation',
+  engulfing_reversal: 'Engulfing Reversal',
+  mark2: 'Mark2',
+  mark_dollar_supertrend: 'Mark Dollar ST',
+  "20ema": '20 EMA',
+  engulf_volume_fade: 'Engulf Volume Fade',
+};
+
+const rrMatrixContainer = document.getElementById('rrMatrixContainer');
+const rrSaveBtn = document.getElementById('rrSaveBtn');
+const rrResetBtn = document.getElementById('rrResetBtn');
+const rrSaveStatusEl = document.getElementById('rrSaveStatus');
+
+let currentRrMatrix = null;
+const rrDirty = {}; // "strategy|timeframe" -> value
+
+function cellKey(strategy, tf) { return strategy + '|' + tf; }
+
+function renderRrMatrix() {
+  const strategies = currentRrMatrix.available_strategies || [];
+  const timeframes = currentRrMatrix.available_timeframes || [];
+
+  const headerCells = timeframes.map(tf => `<th>${tf}</th>`).join('');
+  const rows = strategies.map(strategy => {
+    const cells = timeframes.map(tf => {
+      const value = currentRrMatrix.matrix[strategy][tf];
+      return `<td><input type="number" step="0.1" min="0" data-strategy="${strategy}" data-tf="${tf}" value="${value}"></td>`;
+    }).join('');
+    return `<tr><td>${STRATEGY_LABELS[strategy] || strategy}</td>${cells}</tr>`;
+  }).join('');
+
+  rrMatrixContainer.innerHTML = `
+    <table class="rr-table">
+      <thead><tr><th>Strategy</th>${headerCells}</tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+
+  rrMatrixContainer.querySelectorAll('input').forEach(input => {
+    input.addEventListener('input', () => {
+      const key = cellKey(input.dataset.strategy, input.dataset.tf);
+      rrDirty[key] = input.value;
+      input.classList.add('dirty');
+      rrSaveStatusEl.textContent = '';
+      rrSaveStatusEl.className = 'save-status';
+    });
+  });
+}
+
+async function loadRrMatrix() {
+  try {
+    const res = await fetch('/api/settings/rr-matrix/');
+    currentRrMatrix = await res.json();
+    renderRrMatrix();
+  } catch (err) {
+    rrMatrixContainer.innerHTML = '<div style="padding:20px;color:#ef5350">Failed to load RR matrix: ' + err + '</div>';
+  }
+}
+
+rrSaveBtn.addEventListener('click', async () => {
+  const keys = Object.keys(rrDirty);
+  if (!keys.length) {
+    rrSaveStatusEl.textContent = 'No changes to save.';
+    rrSaveStatusEl.className = 'save-status';
+    return;
+  }
+
+  const updates = {};
+  for (const key of keys) {
+    const [strategy, tf] = key.split('|');
+    const n = parseFloat(rrDirty[key]);
+    if (Number.isNaN(n)) {
+      rrSaveStatusEl.textContent = `Invalid RR for ${strategy} / ${tf}: "${rrDirty[key]}"`;
+      rrSaveStatusEl.className = 'save-status err';
+      return;
+    }
+    if (!updates[strategy]) updates[strategy] = {};
+    updates[strategy][tf] = n;
+  }
+
+  rrSaveBtn.disabled = true;
+  rrSaveStatusEl.textContent = 'Saving…';
+  rrSaveStatusEl.className = 'save-status';
+  try {
+    const res = await fetch('/api/settings/rr-matrix/save/', {
+      method: 'POST',
+      headers: { 'X-CSRFToken': csrfToken, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ updates }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      rrSaveStatusEl.textContent = data.error || 'Save failed.';
+      rrSaveStatusEl.className = 'save-status err';
+      return;
+    }
+    currentRrMatrix = data;
+    for (const k in rrDirty) delete rrDirty[k];
+    renderRrMatrix();
+    rrSaveStatusEl.textContent = 'Saved.';
+    rrSaveStatusEl.className = 'save-status ok';
+  } catch (err) {
+    rrSaveStatusEl.textContent = 'Save failed: ' + err;
+    rrSaveStatusEl.className = 'save-status err';
+  } finally {
+    rrSaveBtn.disabled = false;
+  }
+});
+
+rrResetBtn.addEventListener('click', async () => {
+  if (!confirm('Reset every strategy/timeframe RR back to 1:1?')) return;
+  try {
+    const res = await fetch('/api/settings/rr-matrix/reset/', {
+      method: 'POST',
+      headers: { 'X-CSRFToken': csrfToken },
+    });
+    currentRrMatrix = await res.json();
+    for (const k in rrDirty) delete rrDirty[k];
+    renderRrMatrix();
+    rrSaveStatusEl.textContent = 'Reset to 1:1.';
+    rrSaveStatusEl.className = 'save-status ok';
+  } catch (err) {
+    rrSaveStatusEl.textContent = 'Reset failed: ' + err;
+    rrSaveStatusEl.className = 'save-status err';
+  }
+});
+
+loadRrMatrix();
+</script>
+</body>
+</html>

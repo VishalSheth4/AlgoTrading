@@ -1,0 +1,24 @@
+{% load static %}
+<div id="alertOverlay"></div>
+
+<header>
+    <div class="left-header">
+        <div class="clock-block"><span class="clock-tz">IST</span><span id="clockIST">--:--:--</span></div>
+        {% if header_variant == "dashboard" %}
+        <div id="countdown">next refresh: 1s</div>
+        {% elif header_variant == "chart" %}
+        <div id="liveBadge">● LIVE</div>
+        {% endif %}
+    </div>
+    <div class="title">{{ header_title|default:"algoTrader" }}</div>
+    <div class="right-header">
+        <div id="livePrice">-- / --</div>
+        <div id="latestChange">No alerts yet</div>
+        <button id="autoTradeToggleBtn" type="button">⚡ Auto Trade: OFF</button>
+        <button id="alertToggleBtn" type="button" class="off">🔔 Alerts: OFF</button>
+        <button id="testAlertBtn" type="button">🔔 Test Alert</button>
+    </div>
+</header>
+
+<audio id="alertSound" src="{% static 'core/alert_buzz.wav' %}" preload="auto"></audio>
+<script src="{% static 'core/header.js' %}"></script>
