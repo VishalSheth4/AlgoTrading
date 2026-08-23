@@ -1,16 +1,13 @@
 import pandas as pd
 import numpy as np
-from algoTrading.strategies.SupertrendEngulfingReversalStrategy import _load_rr, _load_lot_size, _load_risk_per_trade
+from algoTrading.config import Config
 
 
 class GreenDollarStrategy:
 
-    _STRATEGY_KEY = "green_dollar"
-
-    def __init__(self):
-        self.rr             = _load_rr(self._STRATEGY_KEY)
-        self.lot_size       = _load_lot_size(self._STRATEGY_KEY)
-        self.risk_per_trade = _load_risk_per_trade(self._STRATEGY_KEY)
+    def __init__(self, rr=None):
+        self.rr       = Config.RR if rr is None else rr
+        self.lot_size = Config.LOT_SIZE
 
     def is_small_body(self, candle):
         body = abs(candle['close'] - candle['open'])

@@ -1,160 +1,122 @@
-"""
-EngulfingConsolidation  (SHORT only)
-=====================================
-Takes a SELL when:
-  1. Supertrend filter passes (see below), AND
-  2. Bearish engulfing candle with upper wick longer than lower wick
-
-BEARISH ENGULFING + UPPER WICK condition:
-  • Previous candle was bullish         (prev close > prev open)
-  • Current candle is bearish           (curr open  > curr close)
-  • Current opens  ≥ previous close    (opens at / above prev close)
-  • Previous open  ≥ current close     (fully engulfs prev body)
-  • Current body   >  previous body    (stronger move)
-  • Upper wick     >  lower wick × wick_ratio
-      upper_wick = curr high  − curr open   (rejection from top)
-      lower_wick = curr close − curr low    (tail from bottom)
-    → wick_ratio = 1.0 means upper wick just needs to be longer
-    → increase wick_ratio (e.g. 1.5) for a stronger rejection signal
-
-SUPERTREND filter:
-  GREEN (trend = +1) → any signal allowed
-  RED   (trend = -1) → only the first red_window candles after the flip
-
-ENTRY / SL / TP:
-  Entry  : close of signal candle
-  SL     : max high of the previous 4 candles
-  TP     : entry − rr × risk
-
-All parameters in config.yaml under engulfing_consolidation.
-"""
-
-import numpy as np
 import pandas as pd
-
-from algoTrading.strategies.SupertrendEngulfingReversalStrategy import (
-    Mark2Strategy,
-    _load_rr,
-    _load_lot_size,
-    _load_risk_per_trade,
-    _load_param,
-)
-
-_KEY = "engulfing_consolidation"
+import numpy as np
+from algoTrading.config import Config
 
 
-class EngulfingConsolidationStrategy(Mark2Strategy):
+class EngulfingConsolidationStrategy:
+    """
+    Signal rules (one per bar, checked at candle close):
 
-    _STRATEGY_KEY = _KEY
+    LONG  — bullish engulfing  +  declining consolidation
+      Engulfing : prev bearish, curr bullish, curr opens ≤ prev close,
+                  curr closes ≥ prev open
+      Consolidation: curr close < close[1,2,3,4]  (price drifting down)
+                     AND curr high > high[7]       (breaks above 7-bar range)
+      SL  : curr low  (extended to prev low  if prev is a doji)
+      TP  : entry + RR × risk
 
-    def __init__(self, period=None, multiplier=None):
-        p = period     or int(_load_param(_KEY,   "st_period",   10))
-        m = multiplier or float(_load_param(_KEY, "st_mult",     3.0))
-        super().__init__(p, m)
+    SHORT — bearish engulfing  +  rising consolidation
+      Engulfing : prev bullish, curr bearish, curr opens ≥ prev close,
+                  curr closes ≤ prev open
+      Consolidation: curr close > close[1,2,3,4]  (price drifting up)
+                     AND curr low < low[7]         (breaks below 7-bar range)
+      SL  : curr high (extended to prev high if prev is a doji)
+      TP  : entry − RR × risk
+    """
 
-        self.rr             = _load_rr(_KEY)
-        self.lot_size       = _load_lot_size(_KEY)
-        self.risk_per_trade = _load_risk_per_trade(_KEY)
+    def __init__(self, rr=None):
+        self.rr       = Config.RR if rr is None else rr
+        self.lot_size = Config.LOT_SIZE
 
-        # Candles allowed after ST turns RED before window closes
-        self.red_window  = int(_load_param(_KEY,   "red_window",  10))
-        # Upper wick must be > lower wick × this ratio
-        self.wick_ratio  = float(_load_param(_KEY, "wick_ratio",  1.0))
+    # ── Candle pattern helpers ────────────────────────────────────────────
 
-    # ─────────────────────────────────────────────────────────────────
+    def _is_small_body(self, candle) -> bool:
+        """Doji / inside bar: body < 30 % of the full wick range."""
+        body = abs(candle['close'] - candle['open'])
+        rng  = candle['high'] - candle['low']
+        return (body < 0.3 * rng) if rng > 0 else False
 
-    def _resolve_st_columns(self, df: pd.DataFrame):
-        trend_col = "st_trend" if "st_trend" in df.columns else "trend"
-        for c in ("st_value", "supertrend", "st"):
-            if c in df.columns:
-                return trend_col, c
-        raise KeyError(f"Supertrend column not found. Available: {df.columns.tolist()}")
+    def _is_bullish_engulfing(self, prev, curr) -> bool:
+        return (
+            prev['close'] < prev['open'] and       # prev candle bearish
+            curr['close'] > curr['open'] and       # curr candle bullish
+            curr['open']  <= prev['close'] and     # opens at/below prev close
+            curr['close'] >= prev['open']          # closes at/above prev open
+        )
 
-    # ─────────────────────────────────────────────────────────────────
-    # Bearish engulfing with upper-wick dominance
-    # ─────────────────────────────────────────────────────────────────
+    def _is_bearish_engulfing(self, prev, curr) -> bool:
+        return (
+            prev['close'] > prev['open'] and       # prev candle bullish
+            curr['close'] < curr['open'] and       # curr candle bearish
+            curr['open']  >= prev['close'] and     # opens at/above prev close
+            curr['close'] <= prev['open']          # closes at/below prev open
+        )
 
-    def _is_valid_candle(self, prev: pd.Series, curr: pd.Series) -> bool:
-        # ── Bearish engulfing ─────────────────────────────────────────
-        if not (
-            prev["close"] > prev["open"]                                          # prev bullish
-            and curr["open"]  > curr["close"]                                     # curr bearish
-            and curr["open"]  >= prev["close"]                                    # opens at/above prev close
-            and prev["open"]  >= curr["close"]                                    # fully engulfs prev body
-            and (curr["open"] - curr["close"]) > (prev["close"] - prev["open"])   # bigger body
-        ):
-            return False
+    # ── Consolidation helpers ─────────────────────────────────────────────
 
-        # ── Upper wick must dominate lower wick ──────────────────────
-        upper_wick = curr["high"]  - curr["open"]    # wick above body (rejection from top)
-        lower_wick = curr["close"] - curr["low"]     # tail below body
+    def _long_consolidation(self, df: pd.DataFrame, i: int) -> bool:
+        """
+        Price has been drifting DOWN for 4 bars, then the current candle's
+        high breaks above the 7-bar-ago high — exhaustion + momentum shift.
+        """
+        curr = df.iloc[i]
+        return (
+            curr['close'] < df.iloc[i - 1]['close'] and
+            curr['close'] < df.iloc[i - 2]['close'] and
+            curr['close'] < df.iloc[i - 3]['close'] and
+            curr['close'] < df.iloc[i - 4]['close'] and
+            curr['high']  > df.iloc[i - 7]['high']
+        )
 
-        # Avoid zero-division; if no lower wick at all, upper wick always wins
-        if lower_wick <= 0:
-            return upper_wick > 0
+    def _short_consolidation(self, df: pd.DataFrame, i: int) -> bool:
+        """
+        Price has been drifting UP for 4 bars, then the current candle's
+        low breaks below the 7-bar-ago low — exhaustion + momentum shift.
+        """
+        curr = df.iloc[i]
+        return (
+            curr['close'] > df.iloc[i - 1]['close'] and
+            curr['close'] > df.iloc[i - 2]['close'] and
+            curr['close'] > df.iloc[i - 3]['close'] and
+            curr['close'] > df.iloc[i - 4]['close'] and
+            curr['low']   < df.iloc[i - 7]['low']
+        )
 
-        return upper_wick >= lower_wick * self.wick_ratio
-
-    # ─────────────────────────────────────────────────────────────────
-    # Signal generation
-    # ─────────────────────────────────────────────────────────────────
+    # ── Signal generation ─────────────────────────────────────────────────
 
     def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
-        df = self.calculate_supertrend(df)
+        df['signal'] = 0
+        df['sl']     = np.nan
+        df['tp']     = np.nan
+        df['lot']    = 0.0
 
-        trend_col, _ = self._resolve_st_columns(df)
-        trend = df[trend_col].values
+        for i in range(8, len(df)):
+            curr = df.iloc[i]
+            prev = df.iloc[i - 1]
 
-        df["signal"]           = 0
-        df["sl"]               = np.nan
-        df["tp"]               = np.nan
-        df["lot"]              = 0.0
-        df["risk_per_trade"]   = np.nan
-        df["sl_exit_on_close"] = 0
+            # ── LONG: bullish engulfing after a declining consolidation ───
+            if self._is_bullish_engulfing(prev, curr) and self._long_consolidation(df, i):
+                entry = curr['close']
+                # Extend SL to include the prev doji low if prev is a small body
+                sl   = min(curr['low'], prev['low']) if self._is_small_body(prev) else curr['low']
+                risk = entry - sl
+                if risk > 0:
+                    df.at[i, 'signal'] = 1
+                    df.at[i, 'sl']     = sl
+                    df.at[i, 'tp']     = entry + self.rr * risk
+                    df.at[i, 'lot']    = self.lot_size
 
-        highs = df["high"].values
-        n     = len(df)
-
-        bars_since_red = 0
-
-        for i in range(7, n):
-
-            # ── Track red-window counter ──────────────────────────────
-            if trend[i] == -1 and trend[i - 1] == 1:
-                bars_since_red = 1
-            elif trend[i] == -1:
-                if bars_since_red > 0:
-                    bars_since_red += 1
-            else:
-                bars_since_red = 0
-
-            # ── Supertrend filter ─────────────────────────────────────
-            # GREEN → always allowed
-            # RED   → only within first red_window bars after flip
-            st_allows = (
-                trend[i] == 1
-                or (trend[i] == -1 and 0 < bars_since_red <= self.red_window)
-            )
-            if not st_allows:
-                continue
-
-            # ── Candle check: bearish engulfing + upper wick ──────────
-            if not self._is_valid_candle(df.iloc[i - 1], df.iloc[i]):
-                continue
-
-            # ── Build trade ───────────────────────────────────────────
-            entry = df.iloc[i]["close"]
-            sl    = float(np.max(highs[i - 4: i]))   # highest high of prev 4 bars
-            risk  = sl - entry
-            if risk <= 0:
-                continue
-
-            df.at[i, "signal"]           = -1
-            df.at[i, "sl"]               = round(sl,                    5)
-            df.at[i, "tp"]               = round(entry - self.rr * risk, 5)
-            df.at[i, "lot"]              = self.lot_size
-            df.at[i, "risk_per_trade"]   = self.risk_per_trade
-            df.at[i, "sl_exit_on_close"] = 1
+            # ── SHORT: bearish engulfing after a rising consolidation ─────
+            elif self._is_bearish_engulfing(prev, curr) and self._short_consolidation(df, i):
+                entry = curr['close']
+                # Extend SL to include the prev doji high if prev is a small body
+                sl   = max(curr['high'], prev['high']) if self._is_small_body(prev) else curr['high']
+                risk = sl - entry
+                if risk > 0:
+                    df.at[i, 'signal'] = -1
+                    df.at[i, 'sl']     = sl
+                    df.at[i, 'tp']     = entry - self.rr * risk
+                    df.at[i, 'lot']    = self.lot_size
 
         return df

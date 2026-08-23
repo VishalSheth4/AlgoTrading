@@ -1,18 +1,15 @@
 import pandas as pd
 import numpy as np
-from algoTrading.strategies.SupertrendEngulfingReversalStrategy import _load_rr, _load_lot_size, _load_risk_per_trade
+from algoTrading.config import Config
 
 
 class SupertrendStrategy:
 
-    _STRATEGY_KEY = "supertrend"
-
-    def __init__(self, period=10, multiplier=3):
-        self.period         = period
-        self.multiplier     = multiplier
-        self.rr             = _load_rr(self._STRATEGY_KEY)
-        self.lot_size       = _load_lot_size(self._STRATEGY_KEY)
-        self.risk_per_trade = _load_risk_per_trade(self._STRATEGY_KEY)
+    def __init__(self, period=10, multiplier=3, rr=None):
+        self.period     = period
+        self.multiplier = multiplier
+        self.rr         = Config.RR if rr is None else rr
+        self.lot_size   = Config.LOT_SIZE
 
     # ── Supertrend (same correct implementation as Mark2) ─────────────
     def _supertrend(self, df):

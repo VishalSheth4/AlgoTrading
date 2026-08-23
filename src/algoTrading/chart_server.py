@@ -23,7 +23,7 @@ import json
 import sys
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -34,41 +34,6 @@ BASE           = Path(__file__).resolve().parent
 SAMPLE_CSV     = BASE / "data" / "sample_data.csv"
 LIVE_CSV       = BASE / "data" / "live_data.csv"
 DASHBOARD_HTML = BASE / "data" / "dashboard.html"
-TRADE_CSV      = BASE / "data" / "trade_data.csv"
-
-# ── Static JS library cache ───────────────────────────────────────────────────
-STATIC_LIBS: dict[str, tuple[str, Path]] = {
-    "preact.js":       ("https://unpkg.com/preact@10/dist/preact.umd.js",
-                        BASE / "data" / "_preact.min.js"),
-    "preact-hooks.js": ("https://unpkg.com/preact@10/hooks/dist/hooks.umd.js",
-                        BASE / "data" / "_preact-hooks.min.js"),
-    "htm.js":          ("https://unpkg.com/htm@3/dist/htm.umd.js",
-                        BASE / "data" / "_htm.min.js"),
-    "chartjs.js":      ("https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js",
-                        BASE / "data" / "_chartjs.min.js"),
-    "lwc.js":          ("https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js",
-                        BASE / "data" / "_lwc.min.js"),
-}
-
-
-def _serve_lib(name: str) -> bytes | None:
-    """Return cached JS library bytes, downloading on first call."""
-    if name not in STATIC_LIBS:
-        return None
-    url, cache_path = STATIC_LIBS[name]
-    if cache_path.exists() and cache_path.stat().st_size > 1000:
-        return cache_path.read_bytes()
-    try:
-        import urllib.request
-        print(f"[static] downloading {name} …")
-        with urllib.request.urlopen(url, timeout=20) as r:
-            data = r.read()
-        cache_path.write_bytes(data)
-        print(f"[static] cached {name} ({len(data)//1024}KB)")
-        return data
-    except Exception as exc:
-        print(f"[static] failed to download {name}: {exc}")
-        return None
 
 FETCH_INTERVAL = 15   # seconds between MT5 polls
 
@@ -344,85 +309,16 @@ def _mark_engulfing(ohlcv: list) -> None:
             curr["wickColor"]   = "#ef5350"
 
 
-# ── OHLCV response cache ──────────────────────────────────────────────────────
-# Stores the heavy json bytes (ohlcv+supertrend+markers) keyed by (csv_path, limit).
-# Cache invalidates when the CSV file's mtime changes (e.g. after a new backtest).
-_resp_cache: dict = {}
-
-
-def _ohlcv_cached_bytes(limit: int = 0, symbol: str = "", tf: str = "") -> bytes:
-    """
-    Build or retrieve the /ohlcv JSON bytes from cache.
-    Only the static OHLCV part is cached; the dynamic 'live' status is appended fresh.
-    """
-    csv_p = _active_csv(symbol, tf)
-    mtime = csv_p.stat().st_mtime if csv_p.exists() else 0
-    key   = (str(csv_p), limit)
-
-    entry = _resp_cache.get(key)
-    if entry is None or entry[0] != mtime:
-        ohlcv, supertrend, markers = _load(limit, symbol, tf)
-        base = json.dumps(
-            {"ohlcv": ohlcv, "supertrend": supertrend, "markers": markers}
-        ).encode()
-        _resp_cache[key] = (mtime, base)
-    else:
-        base = entry[1]
-
-    live_bytes = json.dumps(dict(_live)).encode()
-    return base[:-1] + b',"live":' + live_bytes + b'}'
-
-
 # ── Data loader ───────────────────────────────────────────────────────────────
 
-def _available_symbols() -> dict:
-    """Scan data dir for ohlcv_*.csv; return {SYMBOL: [tf, ...]} ordered M1→D1."""
-    TF_ORDER = ["M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1", "MN"]
-    result: dict = {}
-    for p in sorted((BASE / "data").glob("ohlcv_*.csv")):
-        parts = p.stem.split("_")
-        if len(parts) == 2:          # ohlcv_XAUUSD
-            sym = parts[1]
-            if sym not in result:
-                result[sym] = []
-            meta = p.with_suffix(".meta")
-            if meta.exists():
-                try:
-                    import json as _j
-                    m = _j.loads(meta.read_text(encoding="utf-8"))
-                    base_tf = m.get("timeframe", "D1")
-                    if base_tf not in result[sym]:
-                        result[sym].insert(0, base_tf)
-                except Exception:
-                    pass
-        elif len(parts) == 3:        # ohlcv_XAUUSD_M15
-            sym, t = parts[1], parts[2]
-            if sym not in result:
-                result[sym] = []
-            if t not in result[sym]:
-                result[sym].append(t)
-    for sym in result:
-        result[sym].sort(key=lambda t: TF_ORDER.index(t) if t in TF_ORDER else 99)
-    return result
-
-
-def _active_csv(symbol: str = "", tf: str = "") -> Path:
-    """Prefer ohlcv_{sym}_{tf}.csv → ohlcv_{sym}.csv → live → sample."""
-    sym = (symbol or _SYMBOL).upper().strip()
-    tf  = (tf or "").upper().strip()
-    if tf:
-        p = BASE / "data" / f"ohlcv_{sym}_{tf}.csv"
-        if p.exists():
-            return p
-    p = BASE / "data" / f"ohlcv_{sym}.csv"
-    if p.exists():
-        return p
+def _active_csv() -> Path:
+    """Return live_data.csv when the MT5 feed is active, else sample_data.csv."""
     return LIVE_CSV if (_live["active"] and LIVE_CSV.exists()) else SAMPLE_CSV
 
 
-def _load(limit: int = 0, symbol: str = "", tf: str = ""):
+def _load(limit: int = 0):
     """Load OHLCV data. limit=0 means all available bars."""
-    csv_p = _active_csv(symbol, tf)
+    csv_p = _active_csv()
     df = pd.read_csv(csv_p, usecols=["time", "open", "high", "low", "close"])
     df["time"] = pd.to_datetime(df["time"])
     df = df.sort_values("time").reset_index(drop=True)
@@ -430,336 +326,23 @@ def _load(limit: int = 0, symbol: str = "", tf: str = ""):
     if limit > 0:
         df = df.tail(limit).reset_index(drop=True)
 
-    n = len(df)
-
-    # Vectorised conversion — avoids slow iterrows on large (655k+) datasets.
-    times_unix = (df["time"].astype("int64") // 10 ** 9).tolist()
-    opens_v  = df["open"].round(2).tolist()
-    highs_v  = df["high"].round(2).tolist()
-    lows_v   = df["low"].round(2).tolist()
-    closes_v = df["close"].round(2).tolist()
+    st_all = _supertrend(df)
+    cutoff = int(df["time"].iloc[0].timestamp())
 
     ohlcv = [
-        {"time": t, "open": o, "high": h, "low": l, "close": c}
-        for t, o, h, l, c in zip(times_unix, opens_v, highs_v, lows_v, closes_v)
-    ]
-
-    # Supertrend + engulfing: only compute for smaller datasets.
-    # The Python loops take ~30 s on 655 k bars and bars are sub-pixel anyway.
-    if n <= 50_000:
-        st_all     = _supertrend(df)
-        cutoff     = int(df["time"].iloc[0].timestamp())
-        supertrend = [p for p in st_all if p["time"] >= cutoff]
-        _mark_engulfing(ohlcv)
-    else:
-        supertrend = []
-
-    markers = _load_trade_markers(ohlcv)
-    return ohlcv, supertrend, markers
-
-
-# ── Trade analytics ───────────────────────────────────────────────────────────
-
-def _current_timeframe() -> str:
-    """Re-read Config.TIMEFRAME each call so dashboard reflects config changes."""
-    try:
-        from algoTrading.config import Config as _C
-        return _C.TIMEFRAME
-    except Exception:
-        return _TIMEFRAME
-
-def _calc_streaks(profits: list) -> tuple:
-    max_win = max_loss = cur = 0
-    cur_type = None
-    for p in profits:
-        if p > 0:
-            cur = (cur + 1) if cur_type == "win" else 1
-            cur_type = "win"
-            max_win = max(max_win, cur)
-        elif p < 0:
-            cur = (cur + 1) if cur_type == "loss" else 1
-            cur_type = "loss"
-            max_loss = max(max_loss, cur)
-    return max_win, max_loss, cur, cur_type or "none"
-
-
-def _streak_trades(done: pd.DataFrame, profits: list, is_win: bool) -> list:
-    best_len = best_start = 0
-    cur_len = cur_start = 0
-    for idx, p in enumerate(profits):
-        hit = p > 0 if is_win else p < 0
-        if hit:
-            if cur_len == 0:
-                cur_start = idx
-            cur_len += 1
-            if cur_len > best_len:
-                best_len, best_start = cur_len, cur_start
-        else:
-            cur_len = 0
-    rows = []
-    for _, r in done.iloc[best_start:best_start + best_len].iterrows():
-        lot_v = r.get("lot_size")
-        rows.append({
-            "time":     str(r["time"])[:16],
-            "symbol":   str(r.get("symbol",   "")),
-            "strategy": str(r.get("strategy", "—")),
-            "dir":      "SHORT" if r["type"] == "COVER" else "LONG",
-            "entry":    round(float(r.get("entry_price", 0)), 2),
-            "exit":     round(float(r.get("exit_price",  0)), 2),
-            "lot":      f"{float(lot_v):.2f}" if pd.notna(lot_v) else "—",
-            "profit":   round(float(r["profit"]), 2),
-            "cap":      round(float(r["capital"]), 2),
-        })
-    return rows
-
-
-def _compute_trade_analytics() -> dict:
-    """Read trade_data.csv and return a complete analytics dict for /trades."""
-    if not TRADE_CSV.exists():
-        return {"error": "trade_data.csv not found"}
-
-    df = pd.read_csv(TRADE_CSV)
-    if df.empty:
-        return {"error": "trade_data.csv is empty"}
-
-    done = df[df["type"].isin(["SELL", "COVER"])].copy()
-    done["profit"]  = pd.to_numeric(done["profit"],  errors="coerce")
-    done["capital"] = pd.to_numeric(done["capital"], errors="coerce")
-    done = done.dropna(subset=["profit", "capital"])
-    done["time"] = pd.to_datetime(done["time"], errors="coerce")
-    done = done.sort_values("time").reset_index(drop=True)
-
-    if done.empty:
-        return {"error": "No completed trades"}
-
-    profits = done["profit"].tolist()
-    caps    = done["capital"].tolist()
-    times   = done["time"].tolist()
-
-    wins   = done[done["profit"] > 0]
-    losses = done[done["profit"] < 0]
-    nw, nl = len(wins), len(losses)
-    n      = len(done)
-    outcome_n = nw + nl
-
-    n_long  = int((done["type"] == "SELL").sum())
-    n_short = int((done["type"] == "COVER").sum())
-
-    long_done  = done[done["type"] == "SELL"]
-    short_done = done[done["type"] == "COVER"]
-    long_wins    = int((long_done["profit"] > 0).sum())
-    long_losses  = int((long_done["profit"] < 0).sum())
-    short_wins   = int((short_done["profit"] > 0).sum())
-    short_losses = int((short_done["profit"] < 0).sum())
-
-    start_cap    = caps[0] - profits[0]
-    end_cap      = caps[-1]
-    peak_cap     = round(float(done["capital"].max()), 2)
-    total_profit = round(end_cap - start_cap, 2)
-    profit_pct   = round(total_profit / start_cap * 100, 2) if start_cap else 0
-
-    overall_win_rate = round(nw / outcome_n * 100, 1) if outcome_n else 0
-    avg_win  = round(wins["profit"].mean(),   2) if nw else 0
-    avg_loss = round(losses["profit"].mean(), 2) if nl else 0
-    avg_all  = round(sum(profits) / len(profits), 2) if profits else 0
-
-    gross_win  = float(wins["profit"].sum())        if nw else 0
-    gross_loss = float(abs(losses["profit"].sum())) if nl else 0
-    pf_val     = round(gross_win / gross_loss, 2) if gross_loss > 0 else 999
-    pf_display = str(pf_val) if pf_val != 999 else "∞"
-
-    eq     = done["capital"]
-    dd     = (eq - eq.cummax()) / eq.cummax() * 100
-    max_dd = round(float(dd.min()), 2)
-
-    max_ws, max_ls, cur_s, cur_t = _calc_streaks(profits)
-    win_streak_trades  = _streak_trades(done, profits, True)
-    loss_streak_trades = _streak_trades(done, profits, False)
-
-    date_from = str(times[0])[:16]
-    date_to   = str(times[-1])[:16]
-
-    def _best(grp):
-        if grp.empty:
-            return {"profit": 0, "time": "—", "symbol": "—", "strategy": "—", "dir": "—"}
-        row = grp.loc[grp["profit"].abs().idxmax()]
-        return {
-            "profit":   round(float(row["profit"]), 2),
-            "time":     str(row["time"])[:16],
-            "symbol":   str(row.get("symbol",   "—")),
-            "strategy": str(row.get("strategy", "—")),
-            "dir":      "SHORT" if row["type"] == "COVER" else "LONG",
+        {
+            "time":  int(row["time"].timestamp()),
+            "open":  round(float(row["open"]),  2),
+            "high":  round(float(row["high"]),  2),
+            "low":   round(float(row["low"]),   2),
+            "close": round(float(row["close"]), 2),
         }
-
-    biggest_win  = _best(wins)
-    biggest_loss = _best(losses)
-
-    # Monthly breakdown (win_rate uses wins+losses denominator — consistent with overall)
-    done["_month"] = done["time"].dt.to_period("M")
-    monthly_rows = []
-    for period, grp in done.groupby("_month"):
-        mw  = int((grp["profit"] > 0).sum())
-        ml_ = int((grp["profit"] < 0).sum())
-        mt  = len(grp)
-        mp  = round(float(grp["profit"].sum()), 2)
-        first = grp.iloc[0]
-        ms  = float(first["capital"]) - float(first["profit"])
-        mpct = round(mp / ms * 100, 2) if ms else 0
-        mwr  = round(mw / (mw + ml_) * 100, 1) if (mw + ml_) else 0
-
-        trade_list = []
-        for _, r in grp.iterrows():
-            lot_v = r.get("lot_size")
-            trade_list.append({
-                "time":     str(r["time"])[:16],
-                "symbol":   str(r.get("symbol",   "")),
-                "strategy": str(r.get("strategy", "")),
-                "dir":      "SHORT" if r["type"] == "COVER" else "LONG",
-                "lot":      f"{float(lot_v):.2f}" if pd.notna(lot_v) else "—",
-                "profit":   round(float(r["profit"]), 2),
-                "label":    str(r.get("exit_label", r.get("exit_reason", ""))),
-            })
-
-        monthly_rows.append({
-            "month":      str(period),
-            "trades":     mt,
-            "wins":       mw,
-            "losses":     ml_,
-            "profit":     mp,
-            "profit_pct": mpct,
-            "win_rate":   mwr,
-            "trade_list": trade_list,
-        })
-
-    # Weekly breakdown
-    done["_week"] = done["time"].dt.to_period("W")
-    weekly_rows = []
-    for period, grp in done.groupby("_week"):
-        ww  = int((grp["profit"] > 0).sum())
-        wl_ = int((grp["profit"] < 0).sum())
-        wt  = len(grp)
-        wp  = round(float(grp["profit"].sum()), 2)
-        first = grp.iloc[0]
-        ws  = float(first["capital"]) - float(first["profit"])
-        wpct = round(wp / ws * 100, 2) if ws else 0
-        wwr  = round(ww / (ww + wl_) * 100, 1) if (ww + wl_) else 0
-        weekly_rows.append({
-            "week":       str(period),
-            "trades":     wt,
-            "wins":       ww,
-            "losses":     wl_,
-            "profit":     wp,
-            "profit_pct": wpct,
-            "win_rate":   wwr,
-        })
-
-    # Per-symbol
-    symbols_data = []
-    if "symbol" in done.columns:
-        for sym, grp in done.groupby("symbol", sort=True):
-            sw  = int((grp["profit"] > 0).sum())
-            sl_ = int((grp["profit"] < 0).sum())
-            st_ = len(grp)
-            sp  = round(float(grp["profit"].sum()), 2)
-            swr = round(sw / (sw + sl_) * 100, 1) if (sw + sl_) else 0
-            sc  = grp["capital"].tolist()
-            sp_ = grp["profit"].tolist()
-            ss  = sc[0] - sp_[0] if sc else 0
-            spct = round(sp / ss * 100, 2) if ss else 0
-            symbols_data.append({
-                "symbol":     sym,
-                "trades":     st_,
-                "wins":       sw,
-                "losses":     sl_,
-                "profit":     sp,
-                "win_rate":   swr,
-                "profit_pct": spct,
-            })
-
-    # Build entry-time lookup: pair each BUY/SHORT with the next SELL/COVER
-    entries = df[df["type"].isin(["BUY", "SHORT"])].copy()
-    entries["time"] = pd.to_datetime(entries["time"], errors="coerce")
-    entries = entries.sort_values("time").reset_index(drop=True)
-    # Map entry index → entry time (sequential pairing)
-    entry_times = entries["time"].tolist()
-
-    # All closed trade rows
-    rows = []
-    for idx, (_, r) in enumerate(done.iterrows()):
-        sl_v  = r.get("sl");  sl_s  = f"{float(sl_v):.2f}"  if pd.notna(sl_v)  else "—"
-        tp_v  = r.get("tp");  tp_s  = f"{float(tp_v):.2f}"  if pd.notna(tp_v)  else "—"
-        lot_v = r.get("lot_size"); lot_s = f"{float(lot_v):.2f}" if pd.notna(lot_v) else "—"
-        entry_t = str(entry_times[idx])[:16] if idx < len(entry_times) else "—"
-        rows.append({
-            "num":        idx + 1,
-            "entry_time": entry_t,
-            "time":       str(r["time"])[:16],
-            "symbol":     str(r.get("symbol",   "")),
-            "strategy":   str(r.get("strategy", "")),
-            "dir":        "SHORT" if r["type"] == "COVER" else "LONG",
-            "entry":      round(float(r.get("entry_price", 0)), 2),
-            "sl":         sl_s,
-            "target":     tp_s,
-            "exit":       round(float(r.get("exit_price",  0)), 2),
-            "label":      str(r.get("exit_label", r.get("exit_reason", ""))),
-            "lot":        lot_s,
-            "profit":     round(float(r["profit"]), 2),
-            "cap":        round(float(r["capital"]), 2),
-        })
-
-    eq_labels = ["Start"] + [str(t)[:16] for t in times]
-    eq_data   = [round(start_cap, 2)] + [round(c, 2) for c in caps]
-
-    strategies_str = ", ".join(sorted(done["strategy"].dropna().unique())) if "strategy" in done.columns else ""
-    symbols_str    = ", ".join(sorted(done["symbol"].dropna().unique()))   if "symbol"   in done.columns else ""
-
-    return {
-        "meta": {
-            "strategies": strategies_str,
-            "symbols":    symbols_str,
-            "timeframe":  _current_timeframe(),
-            "n":          n,
-            "date_from":  date_from[:10],
-            "date_to":    date_to[:10],
-        },
-        "metrics": {
-            "start_cap":    round(start_cap, 2),
-            "end_cap":      round(end_cap, 2),
-            "peak_cap":     peak_cap,
-            "total_profit": total_profit,
-            "profit_pct":   profit_pct,
-            "win_rate":     overall_win_rate,
-            "nw":           nw,
-            "nl":           nl,
-            "n_long":       n_long,
-            "n_short":      n_short,
-            "long_wins":    long_wins,
-            "long_losses":  long_losses,
-            "short_wins":   short_wins,
-            "short_losses": short_losses,
-            "avg_win":      avg_win,
-            "avg_loss":     avg_loss,
-            "avg_all":      avg_all,
-            "pf_val":       pf_val,
-            "pf_display":   pf_display,
-            "max_dd":       max_dd,
-            "max_ws":       max_ws,
-            "max_ls":       max_ls,
-            "cur_s":        cur_s,
-            "cur_t":        cur_t,
-            "biggest_win":  biggest_win,
-            "biggest_loss": biggest_loss,
-        },
-        "monthly_rows":       monthly_rows,
-        "weekly_rows":        weekly_rows,
-        "symbols_data":       symbols_data,
-        "rows":               rows,
-        "eq_labels":          eq_labels,
-        "eq_data":            eq_data,
-        "profits":            profits,
-        "win_streak_trades":  win_streak_trades,
-        "loss_streak_trades": loss_streak_trades,
-    }
+        for _, row in df.iterrows()
+    ]
+    _mark_engulfing(ohlcv)
+    supertrend = [p for p in st_all if p["time"] >= cutoff]
+    markers    = _load_trade_markers(ohlcv)
+    return ohlcv, supertrend, markers
 
 
 # ── HTTP handler ──────────────────────────────────────────────────────────────
@@ -785,33 +368,11 @@ class Handler(BaseHTTPRequestHandler):
         qs     = parse_qs(parsed.query)
 
         if path == "/dashboard_hash":
-            # Watch trade_data.csv mtime so the browser reloads after each backtest
             try:
-                mtime = int(TRADE_CSV.stat().st_mtime * 1000) if TRADE_CSV.exists() else 0
+                mtime = int(DASHBOARD_HTML.stat().st_mtime * 1000) if DASHBOARD_HTML.exists() else 0
             except Exception:
                 mtime = 0
             self._json(200, {"hash": mtime})
-
-        elif path.startswith("/static/"):
-            name = path[8:]
-            data = _serve_lib(name)
-            if data:
-                self.send_response(200)
-                self.send_header("Content-Type",   "application/javascript; charset=utf-8")
-                self.send_header("Content-Length", str(len(data)))
-                self.send_header("Cache-Control",  "max-age=86400")
-                self._cors()
-                self.end_headers()
-                self.wfile.write(data)
-            else:
-                self.send_response(404)
-                self.end_headers()
-
-        elif path == "/trades":
-            try:
-                self._json(200, _compute_trade_analytics())
-            except Exception as exc:
-                self._json(500, {"error": str(exc)})
 
         elif path == "/healthz":
             self._json(200, {"status": "ok", "live": dict(_live)})
@@ -819,27 +380,18 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/status":
             self._json(200, {"live": dict(_live)})
 
-        elif path == "/symbols":
-            try:
-                self._json(200, _available_symbols())
-            except Exception as exc:
-                self._json(500, {"error": str(exc)})
-
         elif path == "/ohlcv":
             try:
-                limit  = int(qs.get("limit", [0])[0])
-                sym    = qs.get("sym", [""])[0].strip()
-                tf_req = qs.get("tf",  [""])[0].strip()
+                limit = int(qs.get("limit", [0])[0])
                 if limit < 0:
-                    limit = 0
-                body = _ohlcv_cached_bytes(limit, sym, tf_req)
-                self.send_response(200)
-                self.send_header("Content-Type",   "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.send_header("Cache-Control",  "no-cache")
-                self._cors()
-                self.end_headers()
-                self.wfile.write(body)
+                    limit = 0   # 0 = all bars
+                ohlcv, supertrend, markers = _load(limit)
+                self._json(200, {
+                    "ohlcv":      ohlcv,
+                    "supertrend": supertrend,
+                    "markers":    markers,
+                    "live":       dict(_live),
+                })
             except Exception as exc:
                 self._json(500, {"error": str(exc)})
 
@@ -881,9 +433,7 @@ def run(port: int = 8765):
     t.start()
     print(f"[live] Starting feed for {_SYMBOL} {_TIMEFRAME} (poll every {FETCH_INTERVAL}s)")
 
-    # ThreadingHTTPServer handles each request in its own thread so
-    # heavy OHLCV cache builds don't block the health/status endpoints.
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    server = HTTPServer(("127.0.0.1", port), Handler)
     print(f"chart_server running on http://127.0.0.1:{port}")
     print(f"  Dashboard : http://127.0.0.1:{port}/")
     print(f"  OHLCV API : http://127.0.0.1:{port}/ohlcv?limit=1000")

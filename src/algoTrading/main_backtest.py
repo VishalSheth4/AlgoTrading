@@ -1,567 +1,269 @@
-"""
-main.py — Backtest entry point for the algoTrading framework.
-=============================================================
-
-WHAT THIS MODULE DOES
----------------------
-Orchestrates the full backtest pipeline end-to-end:
-
-    1. CSV cleanup    — deletes ALL .csv files in <project_root>/data/ before any
-                        new data is fetched, preventing stale-cache contamination.
-
-    2. Data fetch     — MT5 mode: connects to MetaTrader 5, pulls fresh OHLCV bars
-                        per symbol and saves them to ohlcv_{symbol}.csv.
-                      — CSV / Kaggle mode: skips the MT5 connection and reads
-                        pre-existing CSV files from disk.
-
-    3. Signal gen.    — Every configured strategy independently generates signal
-                        columns (signal, sl, tp, reverse_exit) for the full bar range.
-
-    4. Signal merge   — Signals from multiple strategies are merged into one timeline.
-                        First strategy in Config.STRATEGY to fire on a bar wins.
-                        Ties never occur because the merge is sequential and exclusive.
-
-    5. Backtest       — BacktestEngine replays the merged signal DataFrame bar-by-bar
-                        with risk-based position sizing using a single shared capital pool
-                        per symbol.
-
-    6. Reporting      — Trade rows are collected, sorted by time, saved to trade_data.csv,
-                        and passed through analyze_trades() + build_dashboard().
-
-KEY CONFIG VALUES USED (algoTrading/config.py)
-----------------------------------------------
-    Config.SYMBOL           : comma-separated symbols, e.g. "XAUUSD" or "XAUUSD,EURUSD"
-    Config.STRATEGY         : comma-separated strategy keys, e.g. "mark_dollar_supertrend"
-    Config.TIMEFRAME        : MT5 timeframe string, e.g. "M5"
-    Config.MODE             : "mt5" (live fetch) | "csv" / "kaggle" (offline)
-    Config.START_DATE       : "YYYY-MM-DD" — bars before this date are dropped (or None)
-    Config.END_DATE         : "YYYY-MM-DD" — bars after this date are dropped (or None)
-    Config.INITIAL_CAPITAL  : starting account balance per symbol, e.g. 100
-    Config.RISK_PER_TRADE   : fraction of capital risked per trade, e.g. 0.01 (= 1 %)
-    Config.BARS             : maximum number of bars to fetch from MT5 (default 200 000)
-    Config.DATA_PATH        : override CSV path for csv/kaggle mode (optional)
-
-SIGNAL MERGE RULES
-------------------
-    - OHLCV columns always come from the authoritative df_base load.
-    - For each bar, the first strategy (left-to-right in Config.STRATEGY) with
-      a non-zero signal wins; that bar is marked and skipped by all later strategies.
-    - The winning strategy's sl, tp, lot, and reverse_exit values are used.
-    - A '_strategy' column in the merged DataFrame records the originating strategy.
-
-OUTPUT FILES  (all written to <project_root>/data/)
----------------------------------------------------
-    ohlcv_{symbol}.csv   — raw OHLCV bars fetched from MT5 (one file per symbol)
-    sample_data.csv      — copy of the first symbol's OHLCV (used by the dashboard)
-    skip_data.csv        — bars flagged SKIP by any strategy (used by the dashboard)
-    trade_data.csv       — full trade log (entries + exits), sorted by time
-
-USAGE
------
-    python main.py
-    # Configure everything in algoTrading/config.py before running.
-"""
-
+import os
 import shutil
+import uuid
+from datetime import datetime
 import numpy as np
 import pandas as pd
-from datetime import datetime
 from pathlib import Path
 
-from algoTrading.strategies.calendar import ForexFactoryCalendar
+from algoTrading.core.fs_utils import replace_with_retry
 from algoTrading.core.mt5_connector import connect, shutdown
 from algoTrading.dashboard import build_dashboard
-from algoTrading.data.fetch_mt5 import fetch_and_store, fetch_all_timeframes
+from algoTrading.data.fetch_mt5 import fetch_and_store
 from algoTrading.data.loader import load_csv
 from algoTrading.backtest.engine import BacktestEngine
 from algoTrading.backtest.metrics import analyze_trades
 from algoTrading.config import Config
+from algoTrading.rr_matrix import get_rr
 
 from algoTrading.strategies.moving_average import MovingAverageStrategy
 from algoTrading.strategies.supertrend_strategy import SupertrendStrategy
 from algoTrading.strategies.engulfing_strategy import EngulfingStrategy
 from algoTrading.strategies.green_dollar import GreenDollarStrategy
+from algoTrading.strategies.green_dollar_clone import GreenDollarCloneStrategy
 from algoTrading.strategies.engulfing_consolidation import EngulfingConsolidationStrategy
-from algoTrading.strategies.SupertrendEngulfingReversalStrategy import Mark2Strategy, SupertrendEngulfingReversalStrategy
+from algoTrading.strategies.mark2_strategy import Mark2Strategy
 from algoTrading.strategies.engulfing_reversal import EngulfingReversalStrategy
 from algoTrading.strategies.mark_dollar_supertrend import MarkDollarSuperTrendStrategy
-from algoTrading.strategies.rsi_engulfing_strategy import RSIEngulfingStrategy
-from algoTrading.strategies.mark5_supertrend import Mark5SupertrendStrategy
-from algoTrading.strategies.SupertrendCounterFlip_X1 import SupertrendCounterFlipX1Strategy
-from algoTrading.strategies.EmaCrossoverRetestStrategy import EmaCrossoverRetestStrategy
-from algoTrading.strategies.Ema200PullbackEngulfingStrategy import Ema200PullbackEngulfingStrategy
-from algoTrading.strategies.DojiStrategy import DojiStrategy
-from algoTrading.strategies.rsi_buy_sell_strategy import RSIBuySellStrategy
-from algoTrading.strategies.RSIEMADoubleCrossStrategy import RSIEMADoubleCrossStrategy
-from algoTrading.strategies.SimpleICT1H5mFVGStrategy import SimpleICT1H5mFVGStrategy
-from algoTrading.strategies.SupertrendTouchSellStrategy import SupertrendTouchSellStrategy
-from algoTrading.strategies.SessionStrategy import SessionStrategy
-# Absolute path to the package root (directory that contains main.py).
+from algoTrading.strategies.ema20 import Ema20Strategy
+from algoTrading.strategies.engulf_volume_fade import EngulfVolumeFadeStrategy
+
 BASE = Path(__file__).resolve().parent
-CONFIG_YAML = BASE / "config.yaml"
 
-
-def load_risk_per_trade() -> float:
-    """Read risk_per_trade from config.yaml (per-strategy → global → fallback)."""
-    try:
-        import yaml
-        with open(CONFIG_YAML, "r") as f:
-            data = yaml.safe_load(f) or {}
-        # 1. Try active strategy's per-strategy risk_per_trade
-        preset = data.get("active_preset", "").strip()
-        if preset:
-            strat_val = data.get("presets", {}).get(preset, preset)
-            first_name = strat_val.split(",")[0].strip()
-            strats = data.get("strategies", {})
-            # Normalize: strip underscores + lowercase for flexible matching
-            norm = lambda s: s.replace("_", "").lower()
-            for yaml_key, yaml_cfg in strats.items():
-                if norm(yaml_key) == norm(first_name) and "risk_per_trade" in yaml_cfg:
-                    return float(yaml_cfg["risk_per_trade"]) / 100.0
-        # 2. Global yaml risk_per_trade
-        if "risk_per_trade" in data:
-            return float(data["risk_per_trade"]) / 100.0
-    except Exception:
-        pass
-    return float(getattr(Config, "RISK_PER_TRADE", 0.08))
-
-# Registry of all available strategy keys → classes.
-# Add new strategies here; Config.STRATEGY selects which ones run.
 STRATEGY_MAP = {
     "engulfing":               EngulfingStrategy,
     "green_dollar":            GreenDollarStrategy,
+    # Bull-only variant (keeps just the source Bullvolumecheck $ marker,
+    # drops the mirrored SHORT side) -- own STRATEGY_MAP entry gives it its
+    # own RR-matrix row and its own checkbox in the Backtest UI, separate
+    # from "green_dollar" itself.
+    "greenDollar":             GreenDollarCloneStrategy,
     "ma":                      MovingAverageStrategy,
     "supertrend":              SupertrendStrategy,
     "engulfing_consolidation": EngulfingConsolidationStrategy,
     "engulfing_reversal":      EngulfingReversalStrategy,
     "mark2":                   Mark2Strategy,
-    "supertrend_engulfing_reversal": SupertrendEngulfingReversalStrategy,
     "mark_dollar_supertrend":  MarkDollarSuperTrendStrategy,
-    "rsi_engulfing":           RSIEngulfingStrategy,
-    "mark5_supertrend":        Mark5SupertrendStrategy,
-    "SupertrendCounterFlip_X1": SupertrendCounterFlipX1Strategy,
-    "EmaCrossoverRetestStrategy": EmaCrossoverRetestStrategy,
-    "Ema200PullbackEngulfingStrategy": Ema200PullbackEngulfingStrategy,
-    "DojiStrategy": DojiStrategy,
-    "RSIBuySellStrategy":RSIBuySellStrategy,
-    "RSIEMADoubleCrossStrategy":    RSIEMADoubleCrossStrategy,
-    "ict_simple_1h5m_fvg":          SimpleICT1H5mFVGStrategy,
-    "SupertrendTouchSell":          SupertrendTouchSellStrategy,
-    "session_strategy":             SessionStrategy,
+    "20ema":                   Ema20Strategy,
+    "engulf_volume_fade":      EngulfVolumeFadeStrategy,
 }
 
 
-# ────────────────────────────────────────────────────────────────────────────────
-# CACHE CLEANUP
-# ────────────────────────────────────────────────────────────────────────────────
-
-def purge_csv_cache() -> None:
-    """
-    Delete ALL .csv files inside <project_root>/data/ before the run starts.
-
-    This guarantees that every backtest works on freshly fetched data with no
-    stale signal, OHLCV, or trade files left over from a previous run.
-
-    Files removed (if they exist):
-        data/ohlcv_*.csv
-        data/sample_data.csv
-        data/skip_data.csv
-        data/trade_data.csv
-        data/<any other *.csv>
-
-    Prints a summary of what was deleted.  Safe to call even if the directory
-    is empty — missing files are silently skipped.
-    """
-    data_dir = BASE / "data"
-    data_dir.mkdir(parents=True, exist_ok=True)     # create if it doesn't exist yet
-
-    csv_files = list(data_dir.glob("*.csv"))
-
-    if not csv_files:
-        print("  [purge]  No CSV files to purge — data/ is already clean.")
-        return
-
-    deleted = []
-    failed  = []
-    for f in csv_files:
-        try:
-            f.unlink()
-            deleted.append(f.name)
-        except OSError as exc:
-            failed.append((f.name, str(exc)))
-
-    print(f"  [purge]  Purged {len(deleted)} CSV file(s) from data/:")
-    for name in deleted:
-        print(f"       - {name}")
-
-    if failed:
-        print(f"  [warn]  Could not delete {len(failed)} file(s):")
-        for name, err in failed:
-            print(f"       - {name}: {err}")
-    
-    calendar_file = data_dir / "fx_calendar.csv"
-    if calendar_file.exists():
-        calendar_file.unlink()
-        print("       — fx_calendar.csv")
-
-
-def fetch_fx_calendar():
-
-    print("\n── Fetching FX Calendar ─────────────────────────")
-
-    try:
-
-        calendar = ForexFactoryCalendar()
-
-        df = calendar.fetch_calendar()
-
-        if df.empty:
-
-            print("  ❌ No FX calendar data fetched")
-            return
-
-        file_path = BASE / "data" / "fx_calendar.csv"
-
-        df.to_csv(file_path, index=False)
-
-        print(f"  ✅ FX calendar saved → {file_path.name}")
-
-    except Exception as e:
-
-        print(f"  ❌ Calendar fetch failed: {e}")
-# ────────────────────────────────────────────────────────────────────────────────
-# STRATEGY FACTORY
-# ────────────────────────────────────────────────────────────────────────────────
-
 def get_strategy(name: str):
-    """
-    Instantiate a strategy by its Config.STRATEGY key.
-
-    Parameters
-    ----------
-    name : str — one of the keys in STRATEGY_MAP (e.g. "mark_dollar_supertrend")
-
-    Returns
-    -------
-    An instantiated strategy object with a .generate_signals(df) method.
-
-    Raises
-    ------
-    ValueError if the key is not registered in STRATEGY_MAP.
-    """
     cls = STRATEGY_MAP.get(name)
     if cls is None:
-        raise ValueError(
-            f"Unknown strategy: {name!r}. "
-            f"Available: {list(STRATEGY_MAP)}"
-        )
-    return cls()
+        raise ValueError(f"Unknown strategy: {name!r}. Available: {list(STRATEGY_MAP)}")
+    # Per-(strategy, timeframe) RR override -- see rr_matrix.py. Defaults to
+    # 1:1 for any (strategy, timeframe) pair that hasn't been explicitly
+    # set via algoTrader's Settings tab.
+    rr = get_rr(name, Config.TIMEFRAME)
+    if name == "20ema":
+        # Only this strategy takes a Supertrend-confirmation switch (see
+        # Config.EMA20_SUPERTREND_FILTER / the Settings UI) -- every other
+        # strategy class's __init__ only accepts rr, so this stays a
+        # special case here rather than a kwarg every strategy must accept.
+        return cls(rr=rr, supertrend_filter=Config.EMA20_SUPERTREND_FILTER)
+    return cls(rr=rr)
 
 
-# ────────────────────────────────────────────────────────────────────────────────
-# DATA FETCHING
-# ────────────────────────────────────────────────────────────────────────────────
+def _atomic_copy(src: str, dst: str) -> None:
+    """Copy via a same-directory temp file + os.replace() -- unlike
+    shutil.copy2 straight to `dst`, this never leaves `dst` half-written if
+    another process (a different timeframe running in parallel, see
+    backtest_runner.py) is reading it at the same moment. Both `dst`
+    candidates here (ohlcv_{symbol}.csv, sample_data.csv) are shared
+    "latest fetch" aliases that every parallel timeframe run writes to."""
+    tmp = f"{dst}.{uuid.uuid4().hex}.tmp"
+    shutil.copy2(src, tmp)
+    replace_with_retry(tmp, dst)
 
-def fetch_symbol(symbol: str, is_first: bool) -> None:
-    """
-    Fetch fresh OHLCV bars for one symbol from MetaTrader 5 and save to CSV.
 
-    Files written
-    -------------
-    data/ohlcv_{symbol}.csv  — full bar history for this symbol.
-    data/sample_data.csv     — copy of the first symbol's file (dashboard uses this).
+def fetch_symbol(symbol: str, is_first: bool):
+    """Fetch OHLCV from MT5 straight into ohlcv_{symbol}_{TIMEFRAME}.csv --
+    the per-timeframe snapshot (same idea as trade_data_{TIMEFRAME}.csv) a
+    candle chart can be rebuilt from for any previously-backtested
+    timeframe. That filename is unique per Config.TIMEFRAME, so it's
+    inherently race-free even when several timeframes fetch the same
+    symbol in parallel. It's then atomically copied into the shared
+    "latest fetch" aliases (ohlcv_{symbol}.csv, and sample_data.csv for the
+    first symbol) that non-timeframe-aware code still reads."""
+    ohlcv_abs    = str(BASE / f"data/ohlcv_{symbol}.csv")
+    ohlcv_per_tf = str(BASE / f"data/ohlcv_{symbol}_{Config.TIMEFRAME}.csv")
+    sample_csv   = str(BASE / "data" / "sample_data.csv")
 
-    Parameters
-    ----------
-    symbol   : str  — MT5 symbol name, e.g. "XAUUSD"  (from Config.SYMBOL)
-    is_first : bool — True for the first symbol; triggers the sample_data.csv copy.
-    """
-    ohlcv_abs  = str(BASE / f"data/ohlcv_{symbol}.csv")
-    sample_csv = BASE / "data" / "sample_data.csv"
-
-    # Config.START_DATE: "YYYY-MM-DD" | None — restrict the fetch window start
-    start_date = getattr(Config, "START_DATE", None)
-    from_date  = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
+    date_from = datetime.strptime(Config.DATE_FROM, "%Y-%m-%d") if Config.DATE_FROM else None
+    date_to = datetime.strptime(Config.DATE_TO, "%Y-%m-%d") if Config.DATE_TO else None
 
     fetch_and_store(
         symbol=symbol,
-        timeframe=Config.TIMEFRAME,         # e.g. "M5"
-        bars=getattr(Config, "BARS", 200000),  # Config.BARS — max bars per fetch
-        save_path=ohlcv_abs,
-        from_date=from_date,
+        timeframe=Config.TIMEFRAME,
+        bars=Config.BARS,
+        save_path=ohlcv_per_tf,
+        date_from=date_from,
+        date_to=date_to,
     )
-
-    # Concurrently download all trading timeframes (M5/M15/M30/H1/H4) with 15-min cache
-    fetch_all_timeframes(
-        symbol=symbol,
-        save_dir=BASE / "data",
-        from_date=from_date,
-        bars=getattr(Config, "BARS", 200_000),
-    )
-
+    _atomic_copy(ohlcv_per_tf, ohlcv_abs)
     if is_first:
-        shutil.copy2(ohlcv_abs, str(sample_csv))
+        _atomic_copy(ohlcv_per_tf, sample_csv)
         print(f"  Chart data → sample_data.csv")
 
 
-# ────────────────────────────────────────────────────────────────────────────────
-# SIGNAL MERGE
-# ────────────────────────────────────────────────────────────────────────────────
-
-def _merge_signals(
-    df_base: pd.DataFrame,
-    sig_dfs: list,
-    strategy_names: list,
-) -> pd.DataFrame:
+def _merge_signals(df_base: pd.DataFrame, sig_dfs: list, strategy_names: list) -> pd.DataFrame:
     """
     Merge signal DataFrames from multiple strategies into a single timeline.
 
-    Each bar can be owned by at most one strategy. The first strategy in
-    Config.STRATEGY order to emit a non-zero signal on a bar claims it;
-    all subsequent strategies are skipped for that bar.
-
-    Parameters
-    ----------
-    df_base        : pd.DataFrame — authoritative OHLCV base (provides time, OHLCV cols)
-    sig_dfs        : list[pd.DataFrame] — signal outputs from each strategy, same index
-    strategy_names : list[str]          — strategy keys matching Config.STRATEGY order
-
-    Returns
-    -------
-    pd.DataFrame — df_base columns plus: signal, sl, tp, lot, reverse_exit, _strategy
+    Rules:
+      - OHLCV columns come from df_base (authoritative).
+      - For each bar, the first strategy (in config order) with a non-zero
+        signal wins — later strategies are skipped for that bar.
+      - The winning strategy's sl, tp, lot, and reverse_exit are used.
+      - A '_strategy' column records which strategy owns each signal bar.
     """
     merged = df_base.copy()
-    merged["signal"]       = 0
-    merged["sl"]           = np.nan
-    merged["tp"]           = np.nan
-    merged["lot"]          = 0.0
-    merged["risk_per_trade"] = np.nan
-    merged["sl_exit_on_close"] = 1
-    merged["reverse_exit"] = 0
-    merged["force_entry"]  = 0
-    merged["_strategy"]    = ""
-    merged["_tp_mode"]     = ""
+    merged['signal']       = 0
+    merged['sl']           = np.nan
+    merged['tp']           = np.nan
+    merged['lot']          = 0.0
+    merged['reverse_exit'] = 0
+    merged['_strategy']    = ''
 
     for sig_df, name in zip(sig_dfs, strategy_names):
-        # Only touch bars not yet claimed by a higher-priority strategy.
-        free       = merged["signal"] == 0
-        has_signal = sig_df["signal"] != 0
-        mask       = free & has_signal
+        # Only fill bars that haven't been claimed yet
+        free = merged['signal'] == 0
+        has_signal = sig_df['signal'] != 0
+        mask = free & has_signal
 
-        merged.loc[mask, "signal"]    = sig_df.loc[mask, "signal"]
-        merged.loc[mask, "sl"]        = sig_df.loc[mask, "sl"]
-        merged.loc[mask, "tp"]        = sig_df.loc[mask, "tp"]
-        merged.loc[mask, "lot"]       = sig_df.loc[mask, "lot"]
-        merged.loc[mask, "_strategy"] = name
+        merged.loc[mask, 'signal']    = sig_df.loc[mask, 'signal']
+        merged.loc[mask, 'sl']        = sig_df.loc[mask, 'sl']
+        merged.loc[mask, 'tp']        = sig_df.loc[mask, 'tp']
+        merged.loc[mask, 'lot']       = sig_df.loc[mask, 'lot']
+        merged.loc[mask, '_strategy'] = name
 
-        if "risk_per_trade" in sig_df.columns:
-            merged.loc[mask, "risk_per_trade"] = sig_df.loc[mask, "risk_per_trade"]
-
-        if "sl_exit_on_close" in sig_df.columns:
-            merged.loc[mask, "sl_exit_on_close"] = sig_df.loc[mask, "sl_exit_on_close"]
-
-        # Copy reverse_exit flag only when the strategy provides it.
-        if "reverse_exit" in sig_df.columns:
-            rev_mask = mask & (sig_df["reverse_exit"] == 1)
-            merged.loc[rev_mask, "reverse_exit"] = 1
-
-        # Copy force_entry flag (session strategy: close prior trade and re-enter).
-        if "force_entry" in sig_df.columns:
-            fe_mask = mask & (sig_df["force_entry"] == 1)
-            merged.loc[fe_mask, "force_entry"] = 1
-
-        # Copy per-strategy tp_mode so the engine labels exits correctly.
-        if "_tp_mode" in sig_df.columns:
-            merged.loc[mask, "_tp_mode"] = sig_df.loc[mask, "_tp_mode"]
+        if 'reverse_exit' in sig_df.columns:
+            # Only copy reverse_exit flags that belong to this strategy's signals
+            rev_mask = mask & (sig_df['reverse_exit'] == 1)
+            merged.loc[rev_mask, 'reverse_exit'] = 1
 
     return merged
 
 
-# ────────────────────────────────────────────────────────────────────────────────
-# PER-SYMBOL BACKTEST
-# ────────────────────────────────────────────────────────────────────────────────
-
 def run_combined_symbol(symbol: str, strategy_names: list) -> list:
     """
-    Run all strategies on one symbol using a single shared capital pool.
-
-    Workflow
-    --------
-    1. Load OHLCV bars from CSV; apply START_DATE / END_DATE filters.
-    2. Generate independent signal DataFrames from every strategy.
-    3. Save skip markers (if any) to data/skip_data.csv for the dashboard.
-    4. Merge all signal DataFrames into one timeline (first-wins rule).
-    5. Run BacktestEngine on the merged DataFrame.
-    6. Print a per-symbol summary (trades, W/L, P&L, capital change).
-
-    Parameters
-    ----------
-    symbol         : str       — instrument, e.g. "XAUUSD"
-    strategy_names : list[str] — strategy keys from Config.STRATEGY
-
-    Returns
-    -------
-    list[dict] — raw trade rows from engine.trades (entries + exits combined)
+    Run all strategies on one symbol with a single shared capital pool.
+    Signals are merged chronologically — first strategy to fire on a bar wins.
+    Returns trade rows, each tagged with the originating strategy name.
     """
-    # ── Load bars ────────────────────────────────────────────────────────────
-    data_path = getattr(Config, "DATA_PATH", None)
-    ohlcv_rel = data_path if data_path else f"data/ohlcv_{symbol}.csv"
+    # MUST read the per-TIMEFRAME snapshot, not the generic ohlcv_{symbol}.csv
+    # alias: when several timeframes run in parallel (see algoTrader's
+    # backtest_runner.py), that alias gets overwritten by whichever
+    # timeframe's fetch finishes last -- reading it here would silently
+    # backtest this run against a DIFFERENT timeframe's candles.
+    ohlcv_rel = f"data/ohlcv_{symbol}_{Config.TIMEFRAME}.csv"
     df_base   = load_csv(ohlcv_rel)
 
-    # Config.START_DATE / END_DATE — trim bars outside the backtest window
-    start_date = getattr(Config, "START_DATE", None)  # "YYYY-MM-DD" | None
-    end_date   = getattr(Config, "END_DATE",   None)  # "YYYY-MM-DD" | None
-
-    if start_date is not None:
-        cutoff  = pd.Timestamp(start_date)
-        df_base = df_base[df_base["time"] >= cutoff].reset_index(drop=True)
-        print(f"    START_DATE={start_date} → {len(df_base):,} bars from {cutoff.date()} onwards")
-
-    if end_date is not None:
-        end_ts  = pd.Timestamp(end_date)
-        df_base = df_base[df_base["time"] <= end_ts].reset_index(drop=True)
-        print(f"    END_DATE={end_date}   → {len(df_base):,} bars up to {end_ts.date()}")
-
-    # ── Generate signals from each strategy independently ────────────────────
-    sig_dfs       = []
+    # Generate signals from every strategy independently
+    sig_dfs = []
     total_signals = 0
-    all_skips     = []
-
     for name in strategy_names:
         sig_df = get_strategy(name).generate_signals(df_base)
-        n      = int((sig_df["signal"] != 0).sum())
+        n = int((sig_df['signal'] != 0).sum())
         total_signals += n
         print(f"    [{name}] signals: {n}")
         sig_dfs.append(sig_df)
 
-        # Collect any bars that the strategy explicitly skipped.
-        if "skip" in sig_df.columns:
-            skipped = sig_df[sig_df["skip"] == "SKIP"][["time"]].copy()
-            n_skip  = len(skipped)
-            if n_skip:
-                print(f"    [{name}] skipped : {n_skip}")
-            all_skips.append(skipped)
-
-    # Save combined skip markers so the dashboard can overlay them on the chart.
-    if all_skips:
-        skip_df   = pd.concat(all_skips, ignore_index=True)
-        skip_path = BASE / "data" / "skip_data.csv"
-        skip_df.to_csv(skip_path, index=False)
-
-    # ── Merge signals into one authoritative timeline ────────────────────────
-    merged           = _merge_signals(df_base, sig_dfs, strategy_names)
-    combined_signals = int((merged["signal"] != 0).sum())
+    # Merge into one timeline
+    merged = _merge_signals(df_base, sig_dfs, strategy_names)
+    combined_signals = int((merged['signal'] != 0).sum())
     print(f"    Combined unique signals : {combined_signals}  (out of {total_signals} raw)")
 
-    # ── Run the backtest engine ───────────────────────────────────────────────
-    # One engine = one capital account shared across all strategies for this symbol.
-    # Config.INITIAL_CAPITAL and Config.RISK_PER_TRADE drive sizing.
-    risk_per_trade = load_risk_per_trade()
+    # Single engine — one capital account for all strategies
     engine = BacktestEngine(
-        capital=Config.INITIAL_CAPITAL,         # e.g. 100
-        risk_per_trade=risk_per_trade,          # config.yaml, fallback Config.RISK_PER_TRADE
+        capital=Config.INITIAL_CAPITAL,
+        risk_per_trade=Config.RISK_PER_TRADE,
         symbol=symbol,
-        min_sl_dist=0.10,                       # skip signals where SL < 0.10 pts from entry
     )
-    result = engine.run(merged, save=False)     # save=False — we save centrally below
+    result = engine.run(merged, save=False)
 
-    # ── Print per-symbol summary ─────────────────────────────────────────────
-    wins   = sum(1 for t in engine.trades if t.get("type") in ("SELL", "COVER") and t.get("profit", 0) >  0)
+    wins   = sum(1 for t in engine.trades if t.get("type") in ("SELL", "COVER") and t.get("profit", 0) > 0)
     losses = sum(1 for t in engine.trades if t.get("type") in ("SELL", "COVER") and t.get("profit", 0) <= 0)
     pnl    = result["final_capital"] - Config.INITIAL_CAPITAL
 
     print(f"    Trades  : {result['total_trades']}  |  W {wins}  L {losses}")
     print(f"    P&L     : {'+' if pnl >= 0 else ''}{pnl:.2f}  ({result['return (%)']:+.2f}%)")
     print(f"    Capital : {Config.INITIAL_CAPITAL} → {result['final_capital']}")
-    print(f"    Risk    : {risk_per_trade * 100:.2f}% per trade")
 
     return engine.trades
 
 
-# ────────────────────────────────────────────────────────────────────────────────
-# MAIN ENTRY POINT
-# ────────────────────────────────────────────────────────────────────────────────
-
-def main() -> None:
-    purge_csv_cache()
-    fetch_fx_calendar()
-    """
-    Full pipeline: purge cache → fetch data → generate signals → backtest → report.
-
-    Reads all settings from Config (algoTrading/config.py).  No CLI args needed.
-    """
-    # Parse comma-separated symbol and strategy lists from Config.
+def main():
     symbols    = [s.strip() for s in Config.SYMBOL.split(",")   if s.strip()]
     strategies = [s.strip() for s in Config.STRATEGY.split(",") if s.strip()]
 
-    # Config.MODE: "mt5" | "csv" | "kaggle"
-    mode     = getattr(Config, "MODE", "mt5").lower()
-    csv_mode = mode in ("csv", "kaggle")
-
-    # ── Banner ───────────────────────────────────────────────────────────────
     print(f"\n{'='*60}")
     print(f"  BACKTEST  —  merged strategy execution")
-    print(f"  Mode       : {'CSV / Kaggle (offline)' if csv_mode else 'MT5 (live fetch)'}")
     print(f"  Strategies : {', '.join(strategies)}")
     print(f"  Symbols    : {', '.join(symbols)}")
-    print(f"  Timeframe  : {Config.TIMEFRAME}  |  Bars : {getattr(Config, 'BARS', 'N/A')}")
+    if Config.DATE_FROM:
+        print(f"  Timeframe  : {Config.TIMEFRAME}  |  Range : {Config.DATE_FROM} -> {Config.DATE_TO or 'now'} (UTC)")
+    else:
+        print(f"  Timeframe  : {Config.TIMEFRAME}  |  Bars : {Config.BARS}")
     print(f"  Capital    : ${Config.INITIAL_CAPITAL} per symbol  (shared across strategies)")
     print(f"{'='*60}")
 
-    # ── Step 1: Purge stale CSV cache ────────────────────────────────────────
-    # Deletes every *.csv in data/ so we always work from fresh data.
-    print(f"\n── Purging CSV cache ──────────────────────────────────────")
-    purge_csv_cache()
+    # ── Connect MT5 ────────────────────────────────────────────────
+    if not connect():
+        return
 
-    # ── Step 2: Fetch / validate data ────────────────────────────────────────
-    if csv_mode:
-        # Offline mode — validate that required CSV files exist on disk.
-        data_path = getattr(Config, "DATA_PATH", None)
-        print(f"\n── CSV mode — using {'DATA_PATH' if data_path else 'ohlcv_{symbol}.csv'} ──")
-        for symbol in symbols:
-            csv_p = BASE / data_path if data_path else BASE / "data" / f"ohlcv_{symbol}.csv"
-            if not csv_p.exists():
-                hint = "check Config.DATA_PATH" if data_path else "run fetch_kaggle.py first"
-                print(f"  ❌ {csv_p} not found — {hint}")
-                return
-            print(f"  ✅ {symbol} — {csv_p.name}")
-    else:
-        # MT5 mode — connect to the terminal and pull fresh bars for every symbol.
-        if not connect():
-            return
-        print(f"\n── Fetching data ──────────────────────────────────────────")
-        for i, symbol in enumerate(symbols):
-            print(f"  {symbol}")
-            fetch_symbol(symbol, is_first=(i == 0))
-        shutdown()
+    # ── Fetch all symbols once ─────────────────────────────────────
+    print(f"\n── Fetching data ──────────────────────────────────────────")
+    for i, symbol in enumerate(symbols):
+        print(f"  {symbol}")
+        fetch_symbol(symbol, is_first=(i == 0))
 
-    # ── Step 3: Run each symbol ───────────────────────────────────────────────
-    all_trades: list = []
+    shutdown()
+
+    # ── Run each symbol with all strategies merged ─────────────────
+    all_trades = []
     for symbol in symbols:
         print(f"\n── {symbol}  |  {Config.TIMEFRAME}  {'─'*40}")
         trades = run_combined_symbol(symbol, strategies)
         all_trades.extend(trades)
 
-    # ── Step 4: Save combined trade log sorted by time ────────────────────────
-    trade_path = BASE / "data" / "trade_data.csv"
-
+    # ── Save combined trade log (sorted by time) ───────────────────
+    # trade_data.csv is the "latest run" alias analyze_trades()/dashboard.py
+    # always read. trade_data_{TIMEFRAME}.csv is a per-timeframe snapshot so
+    # running several timeframes back to back (e.g. from algoTrader's
+    # Backtest tab) doesn't overwrite each other -- each timeframe's results
+    # stay queryable afterward.
+    trade_path        = BASE / "data" / "trade_data.csv"
+    trade_path_per_tf = BASE / "data" / f"trade_data_{Config.TIMEFRAME}.csv"
     if not all_trades:
-        print("\n⚠️  No trades executed — nothing to save.")
+        print("\nNo trades executed.")
         return
 
-    trade_df           = pd.DataFrame(all_trades)
-    trade_df["time"]   = pd.to_datetime(trade_df["time"])
-    trade_df           = trade_df.sort_values("time").reset_index(drop=True)
-    trade_df.to_csv(trade_path, index=False)
-    print(f"\nSaved {len(all_trades)} trade rows → trade_data.csv  (sorted by time)")
+    trade_df = pd.DataFrame(all_trades)
+    trade_df['time'] = pd.to_datetime(trade_df['time'])
+    trade_df = trade_df.sort_values('time').reset_index(drop=True)
 
-    # ── Step 5: Performance metrics ───────────────────────────────────────────
+    # trade_path_per_tf's filename is unique per Config.TIMEFRAME (race-free
+    # under parallel timeframe runs); trade_path is a shared "latest run"
+    # alias every parallel run writes to, so it goes through the same
+    # temp-file + os.replace() pattern as fetch_symbol()'s shared aliases --
+    # atomic, so a reader never sees a half-written CSV.
+    trade_df.to_csv(trade_path_per_tf, index=False)
+    tmp_path = f"{trade_path}.{uuid.uuid4().hex}.tmp"
+    trade_df.to_csv(tmp_path, index=False)
+    replace_with_retry(tmp_path, trade_path)
+
+    print(f"\nSaved {len(all_trades)} trade rows → trade_data.csv, trade_data_{Config.TIMEFRAME}.csv  (sorted by time)")
+
+    # ── Overall metrics ────────────────────────────────────────────
     metrics = analyze_trades()
     print("\n===== COMBINED PERFORMANCE METRICS =====")
     for key, value in metrics.items():
         print(f"  {key}: {value}")
 
-    # ── Step 6: Dashboard ─────────────────────────────────────────────────────
+    # ── Dashboard ──────────────────────────────────────────────────
     build_dashboard()
 
 

@@ -1,26 +1,11 @@
 import MetaTrader5 as mt5
-from algoTrading.config import Config
 
 def connect():
-    login    = getattr(Config, 'MT5_LOGIN',    None)
-    password = getattr(Config, 'MT5_PASSWORD', None)
-    server   = getattr(Config, 'MT5_SERVER',   None)
-
-    if login and password and server:
-        ok = mt5.initialize(login=int(login), password=str(password), server=str(server))
-        print(f"  Connecting as account {login} on {server} ...")
-    else:
-        ok = mt5.initialize()
-
-    if not ok:
-        print(f"❌ MT5 Initialization Failed: {mt5.last_error()}")
+    if not mt5.initialize():
+        print("❌ MT5 Initialization Failed")
         return False
 
-    info = mt5.account_info()
-    if info:
-        print(f"✅ MT5 Connected — {info.name} | {info.server} | Balance: {info.balance} {info.currency}")
-    else:
-        print("✅ MT5 Connected")
+    print("✅ MT5 Connected")
     return True
 
 

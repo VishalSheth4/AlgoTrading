@@ -1,174 +1,116 @@
-import json
-import time
+from datetime import datetime
+
 import MetaTrader5 as mt5
 import pandas as pd
-from datetime import datetime
 from pathlib import Path
+import os
+import uuid
 
-
-def _ensure_connected() -> bool:
-    """
-    Make sure MT5 is initialized with credentials from Config.
-    Safe to call even if already connected — MT5 ignores duplicate inits.
-    """
-    try:
-        from algoTrading.config import Config
-        login    = int(Config.MT5_LOGIN)    if getattr(Config, "MT5_LOGIN",    None) else None
-        password = str(Config.MT5_PASSWORD) if getattr(Config, "MT5_PASSWORD", None) else None
-        server   = str(Config.MT5_SERVER)   if getattr(Config, "MT5_SERVER",   None) else None
-
-        if login and password and server:
-            ok = mt5.initialize(login=login, password=password, server=server)
-        else:
-            ok = mt5.initialize()
-
-        if not ok:
-            print(f"  [mt5] init failed: {mt5.last_error()}")
-        return ok
-    except Exception as exc:
-        print(f"  [mt5] _ensure_connected error: {exc}")
-        return False
+from algoTrading.core.broker_time import get_broker_time_offset
+from algoTrading.core.fs_utils import replace_with_retry
 
 TIMEFRAME_MAP = {
-    "M1":  mt5.TIMEFRAME_M1,
-    "M5":  mt5.TIMEFRAME_M5,
+    "M1": mt5.TIMEFRAME_M1,
+    "M5": mt5.TIMEFRAME_M5,
     "M15": mt5.TIMEFRAME_M15,
     "M30": mt5.TIMEFRAME_M30,
-    "H1":  mt5.TIMEFRAME_H1,
-    "H4":  mt5.TIMEFRAME_H4,
-    "D1":  mt5.TIMEFRAME_D1,
+    "H1": mt5.TIMEFRAME_H1,
+    "H4": mt5.TIMEFRAME_H4,
+    "D1": mt5.TIMEFRAME_D1,
 }
 
-CACHE_TTL = 900  # 15 minutes in seconds
-
-MULTI_TIMEFRAMES = ["M5", "M15", "M30", "H1", "H4"]
-
-
-def _meta_path(save_path: str) -> Path:
-    return Path(save_path).with_suffix(".meta")
-
-
-def _cache_valid(save_path: str, timeframe: str, from_date: datetime | None) -> bool:
-    """Return True if cached CSV is < 1 hour old, same timeframe, and same from_date."""
-    csv_p  = Path(save_path)
-    meta_p = _meta_path(save_path)
-
-    if not csv_p.exists() or not meta_p.exists():
-        return False
-
-    try:
-        meta = json.loads(meta_p.read_text())
-    except Exception:
-        return False
-
-    if meta.get("timeframe") != timeframe:
-        return False
-
-    # Invalidate if from_date changed
-    cached_from = meta.get("from_date")
-    new_from    = from_date.strftime("%Y-%m-%d") if from_date else None
-    if cached_from != new_from:
-        return False
-
-    age_seconds = time.time() - meta.get("cached_at", 0)
-    return age_seconds < CACHE_TTL
+# FX/gold markets are closed roughly Friday evening through Sunday evening
+# (exact minute is broker-specific) -- some MT5 demo/prop-firm servers keep
+# serving organic-looking-but-fabricated bars through that window anyway,
+# which silently feeds strategies (and backtests) phantom weekend trades.
+# Drop anything whose CORRECTED UTC timestamp falls here. Adjust these two
+# pairs if your broker's published market hours differ.
+MARKET_CLOSE_WEEKDAY = 4   # Friday (Monday=0 .. Sunday=6)
+MARKET_CLOSE_HOUR_UTC = 21
+MARKET_OPEN_WEEKDAY = 6    # Sunday
+MARKET_OPEN_HOUR_UTC = 21
 
 
-def fetch_and_store(symbol, timeframe, bars, save_path, from_date: datetime | None = None):
+def _drop_weekend_bars(df: pd.DataFrame) -> pd.DataFrame:
+    minutes = df["time"].dt.weekday * 24 * 60 + df["time"].dt.hour * 60 + df["time"].dt.minute
+    close_minutes = MARKET_CLOSE_WEEKDAY * 24 * 60 + MARKET_CLOSE_HOUR_UTC * 60
+    open_minutes = MARKET_OPEN_WEEKDAY * 24 * 60 + MARKET_OPEN_HOUR_UTC * 60
+    closed = (minutes >= close_minutes) & (minutes < open_minutes)
+    dropped = int(closed.sum())
+    if dropped:
+        print(f"⚠️ Dropped {dropped} weekend bar(s) (market closed Fri {MARKET_CLOSE_HOUR_UTC}:00 UTC -> Sun {MARKET_OPEN_HOUR_UTC}:00 UTC)")
+    return df.loc[~closed].reset_index(drop=True)
 
-    # ── Cache hit: skip MT5 fetch ─────────────────────────────────
-    if _cache_valid(save_path, timeframe, from_date):
-        meta      = json.loads(_meta_path(save_path).read_text(encoding="utf-8"))
-        age_min   = int((time.time() - meta["cached_at"]) / 60)
-        remaining = int((CACHE_TTL - (time.time() - meta["cached_at"])) / 60)
-        print(f"✅ Cache hit — {symbol} {timeframe} | cached {age_min}m ago | refreshes in ~{remaining}m")
-        return
-
-    # Ensure MT5 is connected before any API calls
-    if not _ensure_connected():
-        raise RuntimeError(
-            "MT5 not connected. Open MetaTrader5 terminal and log in, then retry."
-        )
+def fetch_and_store(symbol, timeframe, bars, save_path, date_from: datetime | None = None, date_to: datetime | None = None):
+    """Fetch either the last `bars` candles (default), or every candle
+    inside [date_from, date_to] when date_from is given -- date_to defaults
+    to now. date_from/date_to are naive datetimes in true UTC (same
+    convention as every other timestamp in this app); they're converted to
+    the broker's own server time before querying MT5, since
+    copy_rates_range filters using the terminal's own (uncorrected) bar
+    timestamps, not the corrected ones this function returns.
+    """
 
     tf = TIMEFRAME_MAP.get(timeframe)
+
     if tf is None:
-        raise ValueError(f"❌ Invalid timeframe: {timeframe!r}")
+        raise ValueError("❌ Invalid timeframe")
 
-    # ── Calculate bar count from start date (if given) ────────────
-    # Use copy_rates_from_pos — most reliable across all MT5 brokers.
-    # Bar count is calculated from START_YEAR so we always cover the full range.
-    if from_date is not None:
-        # M5 = 12 bars/h × 24h × 5 trading days/week × 52 weeks ≈ 74,880/year
-        # Use 80,000/year + 20% buffer to be safe
-        years     = max(1, (datetime.utcnow() - from_date).days / 365.25)
-        bar_count = min(int(years * 80_000 * 1.2), 3_000_000)
-        print(f"🔄 Fetching {symbol} {timeframe} | "
-              f"START_DATE={from_date.date()} | ~{bar_count:,} bars ...")
+    offset = get_broker_time_offset(mt5, symbol).get_offset()
+
+    if date_from is not None:
+        server_from = date_from + offset
+        server_to = (date_to or datetime.utcnow()) + offset
+        print(f"Fetching {symbol} from {date_from} to {date_to or 'now'} (UTC)...")
+        rates = mt5.copy_rates_range(symbol, tf, server_from, server_to)
     else:
-        bar_count = bars
-        print(f"🔄 Fetching {bar_count:,} bars for {symbol} {timeframe} from MT5...")
+        print(f"Fetching {bars} bars for {symbol}...")
+        rates = mt5.copy_rates_from_pos(symbol, tf, 0, bars)
 
-    # Try requested count, then fall back to smaller counts if broker rejects
-    rates = None
-    for attempt_count in sorted({bar_count, 99_999, 50_000, 10_000}, reverse=True):
-        if attempt_count > bar_count:
-            continue
-        rates = mt5.copy_rates_from_pos(symbol, tf, 0, attempt_count)
-        if rates is not None and len(rates) > 0:
-            if attempt_count < bar_count:
-                print(f"  Broker limit hit — fetched {attempt_count:,} bars instead of {bar_count:,}")
-            break
-        print(f"  Retrying with {attempt_count:,} bars ...")
-
-    if rates is None or len(rates) == 0:
+    if rates is None:
         print("❌ Error:", mt5.last_error())
         raise Exception("Failed to fetch MT5 data")
 
-    print(f"✅ Received {len(rates):,} bars")
+    if len(rates) == 0:
+        raise Exception("❌ No data returned")
 
+    print(f"✅ Received {len(rates)} bars")
+
+    # ----------------------------
+    # CONVERT TO DATAFRAME (ALL COLUMNS)
+    # ----------------------------
     df = pd.DataFrame(rates)
+
+    # Convert time properly
     df['time'] = pd.to_datetime(df['time'], unit='s')
 
-    # Overwrite CSV
-    csv_p = Path(save_path)
-    if csv_p.exists():
-        csv_p.unlink()
+    # MT5's server clock is commonly UTC+2/UTC+3 (EET/EEST), not true UTC --
+    # correct it here, at the source, exactly like algoTrader's live reader
+    # does. Without this, backtested trade timestamps are off by the
+    # broker's offset (an XAUUSD broker running EEST made every backtest
+    # trade land ~3 hours later than the live dashboard's alert for the
+    # SAME candle), which makes comparing a live signal against the
+    # backtest impossible.
+    df['time'] = df['time'] - get_broker_time_offset(mt5, symbol).get_offset()
 
-    df.to_csv(save_path, index=False)
-    print(f"✅ Data saved to {save_path}  ({df['time'].min().date()} → {df['time'].max().date()})")
+    df = _drop_weekend_bars(df)
 
-    # Write / update sidecar metadata
-    _meta_path(save_path).write_text(json.dumps({
-        "symbol":    symbol,
-        "timeframe": timeframe,
-        "bars":      len(df),
-        "from_date": from_date.strftime("%Y-%m-%d") if from_date else None,
-        "cached_at": time.time(),
-    }), encoding="utf-8")
-    print(f"📦 Cache written — next refresh in 15min")
+    # 🔥 KEEP ALL COLUMNS (NO DROP)
+    # ['time','open','high','low','close','tick_volume','spread','real_volume']
 
+    # ----------------------------
+    # SAVE CSV -- write to a unique temp file in the same directory, then
+    # atomically replace the target. Running several timeframes in
+    # PARALLEL (see backtest_runner.py) means multiple processes can fetch
+    # the same symbol at once; the old delete-then-write approach was a
+    # race (one process's delete could clobber another's in-progress
+    # write). os.replace() is atomic on both Windows and POSIX as long as
+    # source and destination are on the same filesystem, which the temp
+    # file (written right next to save_path) guarantees.
+    # ----------------------------
+    save_path = str(save_path)
+    tmp_path = f"{save_path}.{uuid.uuid4().hex}.tmp"
+    df.to_csv(tmp_path, index=False)
+    replace_with_retry(tmp_path, save_path)
 
-def fetch_all_timeframes(
-    symbol: str,
-    save_dir,
-    from_date: datetime | None = None,
-    bars: int = 200_000,
-) -> None:
-    """Fetch M5, M15, M30, H1, H4 for one symbol concurrently with 15-min cache."""
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    save_dir = Path(save_dir)
-
-    def _fetch_one(tf: str):
-        path = str(save_dir / f"ohlcv_{symbol}_{tf}.csv")
-        fetch_and_store(symbol, tf, bars, path, from_date)
-        return tf
-
-    print(f"\n── Multi-TF fetch: {symbol} ({', '.join(MULTI_TIMEFRAMES)}) ─────")
-    with ThreadPoolExecutor(max_workers=5) as ex:
-        futures = {ex.submit(_fetch_one, tf): tf for tf in MULTI_TIMEFRAMES}
-        for fut in as_completed(futures):
-            tf = futures[fut]
-            try:
-                fut.result()
-            except Exception as exc:
-                print(f"  ⚠️  {symbol} {tf} failed: {exc}")
+    print(f"✅ Data saved to {save_path}")

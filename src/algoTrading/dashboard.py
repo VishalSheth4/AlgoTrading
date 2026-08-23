@@ -1,12 +1,11 @@
 import json
+import os
 import socket
 import urllib.request
 import webbrowser
 import pandas as pd
 import numpy as np
 from pathlib import Path
-
-from algoTrading.config import Config
 
 
 def _get_chartjs():
@@ -210,21 +209,6 @@ def _load_trade_markers(ohlcv: list) -> list:
                                 "color": "#ef5350", "shape": "circle",
                                 "text": "SL", "size": 1})
 
-    # ── SKIP markers from skip_data.csv ──────────────────────────────
-    skip_p = Path(__file__).resolve().parent / "data" / "skip_data.csv"
-    if skip_p.exists():
-        try:
-            sk = pd.read_csv(skip_p)
-            sk['ts'] = pd.to_datetime(sk['time']).apply(lambda x: int(x.timestamp()))
-            for _, row in sk.iterrows():
-                bt = snap(int(row['ts']))
-                if bt is not None:
-                    markers.append({"time": bt, "position": "aboveBar",
-                                    "color": "#94a3b8", "shape": "square",
-                                    "text": "SKIP", "size": 1})
-        except Exception:
-            pass
-
     markers.sort(key=lambda m: m['time'])
     return markers
 
@@ -323,316 +307,1209 @@ def _find_streak_trades(done: pd.DataFrame, profits: list) -> tuple:
     return _extract(ws, wl), _extract(ls, ll)
 
 
-def _server_up(host="127.0.0.1", port=8765, timeout=0.5) -> bool:
-    try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
-    except OSError:
-        return False
-
-
-def _start_chart_server() -> None:
-    """Launch chart_server.py in a new terminal window (Windows) or background process (Unix)."""
-    import subprocess, sys, time
-    server_script = Path(__file__).resolve().parent / "chart_server.py"
-    if not server_script.exists():
-        print("[dashboard] chart_server.py not found — open browser manually")
-        return
-    print("[dashboard] starting chart_server.py ...")
-    if sys.platform == "win32":
-        subprocess.Popen(
-            [sys.executable, str(server_script)],
-            creationflags=subprocess.CREATE_NEW_CONSOLE,
-        )
-    else:
-        subprocess.Popen(
-            [sys.executable, str(server_script)],
-            start_new_session=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    # Give it up to 3 s to start
-    for _ in range(30):
-        time.sleep(0.1)
-        if _server_up():
-            return
-    print("[dashboard] server did not start in time — open http://localhost:8765 manually")
-
-
 def build_dashboard():
-    """Write the dashboard HTML, auto-start chart_server if needed, open browser."""
     base   = Path(__file__).resolve().parent
+    csv_p  = base / "data" / "trade_data.csv"
     html_p = base / "data" / "dashboard.html"
 
-    html_src = _render()
-    html_p.write_text(html_src, encoding='utf-8')
+    if not csv_p.exists() or csv_p.stat().st_size == 0:
+        print("[dashboard] trade_data.csv not found or empty — run a backtest first")
+        return
+
+    df = pd.read_csv(csv_p)
+    if df.empty:
+        print("[dashboard] trade_data.csv is empty")
+        return
+
+    done = df[df['type'].isin(['SELL', 'COVER'])].copy()
+    done['profit']  = pd.to_numeric(done['profit'],  errors='coerce')
+    done['capital'] = pd.to_numeric(done['capital'], errors='coerce')
+    done = done.dropna(subset=['profit', 'capital'])
+    done['time'] = pd.to_datetime(done['time'], errors='coerce')
+    done = done.sort_values('time').reset_index(drop=True)
+
+    if done.empty:
+        print("[dashboard] No completed trades to display")
+        return
+
+    profits = done['profit'].tolist()
+    caps    = done['capital'].tolist()
+    times   = done['time'].tolist()
+    n       = len(done)
+
+    wins   = done[done['profit'] > 0]
+    losses = done[done['profit'] < 0]
+    nw, nl = len(wins), len(losses)
+
+    start_cap    = caps[0] - profits[0]
+    end_cap      = caps[-1]
+    total_profit = round(end_cap - start_cap, 2)
+    profit_pct   = round(total_profit / start_cap * 100, 2) if start_cap else 0
+
+    win_rate  = round(nw / n * 100, 2)
+    avg_win   = round(wins['profit'].mean(),   2) if nw else 0
+    avg_loss  = round(losses['profit'].mean(), 2) if nl else 0
+
+    gross_win  = wins['profit'].sum()        if nw else 0
+    gross_loss = abs(losses['profit'].sum()) if nl else 0
+    pf_val     = round(gross_win / gross_loss, 2) if gross_loss > 0 else 999
+    pf_display = str(pf_val) if pf_val != 999 else "∞"
+
+    eq     = done['capital']
+    dd     = (eq - eq.cummax()) / eq.cummax() * 100
+    max_dd = round(dd.min(), 2)
+
+    max_ws, max_ls, cur_s, cur_t = calc_streaks(profits)
+    win_streak_trades, loss_streak_trades = _find_streak_trades(done, profits)
+
+    date_from = str(times[0])[:16]
+    date_to   = str(times[-1])[:16]
+
+    # ── Biggest single win / loss ─────────────────────────────────
+    def _best_trade(grp):
+        if grp.empty:
+            return {"profit": 0, "time": "—", "symbol": "—", "strategy": "—", "dir": "—"}
+        row = grp.loc[grp['profit'].abs().idxmax()]
+        return {
+            "profit":   round(float(row['profit']), 2),
+            "time":     str(row['time'])[:16],
+            "symbol":   str(row.get('symbol',   '—')),
+            "strategy": str(row.get('strategy', '—')),
+            "dir":      "SHORT" if row['type'] == 'COVER' else "LONG",
+        }
+
+    biggest_win  = _best_trade(wins)
+    biggest_loss = _best_trade(losses)
+
+    # ── Monthly breakdown ─────────────────────────────────────────────
+    done['_month'] = pd.to_datetime(done['time'], errors='coerce').dt.to_period('M')
+    monthly_rows = []
+    for period, grp in done.groupby('_month'):
+        mw = (grp['profit'] > 0).sum()
+        ml = (grp['profit'] < 0).sum()
+        mt = len(grp)
+        mp = round(grp['profit'].sum(), 2)
+        # Return % = month P&L / capital at start of month
+        first        = grp.iloc[0]
+        month_start  = float(first['capital']) - float(first['profit'])
+        profit_pct   = round(mp / month_start * 100, 2) if month_start else 0
+        win_rate     = round(float(mw) / mt * 100, 1) if mt else 0
+        monthly_rows.append({
+            "month":      str(period),
+            "trades":     mt,
+            "wins":       int(mw),
+            "losses":     int(ml),
+            "profit":     mp,
+            "profit_pct": profit_pct,
+            "win_rate":   win_rate,
+        })
+
+    # ── Per-symbol breakdown ─────────────────────────────────────
+    symbols_data = []
+    if 'symbol' in done.columns:
+        for sym, grp in done.groupby('symbol', sort=True):
+            sw  = int((grp['profit'] > 0).sum())
+            sl_ = int((grp['profit'] < 0).sum())
+            st_ = len(grp)
+            sp  = round(grp['profit'].sum(), 2)
+            swr = round(sw / st_ * 100, 1) if st_ else 0
+            sym_profs = grp['profit'].tolist()
+            sym_caps  = grp['capital'].tolist()
+            sym_start = sym_caps[0] - sym_profs[0] if sym_caps else 0
+            sym_pct   = round(sp / sym_start * 100, 2) if sym_start else 0
+            symbols_data.append({
+                "symbol":     sym,
+                "trades":     int(st_),
+                "wins":       sw,
+                "losses":     sl_,
+                "profit":     sp,
+                "win_rate":   swr,
+                "profit_pct": sym_pct,
+            })
+
+    # ── Per-trade rows ────────────────────────────────────────────────
+    rows = []
+    for idx, (_, r) in enumerate(done.iterrows()):
+        sl_val  = r.get('sl')
+        tp_val  = r.get('tp')
+        sl_str  = f"{float(sl_val):.2f}" if pd.notna(sl_val) else "—"
+        tp_str  = f"{float(tp_val):.2f}" if pd.notna(tp_val) else "—"
+        label   = str(r.get('exit_label', r.get('exit_reason', '')))
+        rows.append({
+            "num":      idx + 1,
+            "time":     str(r['time'])[:16],
+            "symbol":   str(r.get('symbol',   '')),
+            "strategy": str(r.get('strategy', '')),
+            "dir":      "SHORT" if r['type'] == 'COVER' else "LONG",
+            "entry":  round(float(r.get('entry_price', 0)), 2),
+            "sl":     sl_str,
+            "target": tp_str,
+            "exit":   round(float(r.get('exit_price',  0)), 2),
+            "label":  label,
+            "profit": round(float(r['profit']), 2),
+            "cap":    round(float(r['capital']), 2),
+        })
+
+    eq_labels = ["Start"] + [str(t)[:16] for t in times]
+    eq_data   = [round(start_cap, 2)] + [round(c, 2) for c in caps]
+
+    chartjs            = _get_chartjs()
+    lwc                = _get_lightweightcharts()
+    ohlcv_raw, st_data = _load_ohlcv_with_supertrend()
+    markers            = _load_trade_markers(ohlcv_raw)
+
+    strategies_str = ", ".join(sorted(done['strategy'].dropna().unique())) if 'strategy' in done.columns else ""
+    symbols_str    = ", ".join(sorted(done['symbol'].dropna().unique()))   if 'symbol'   in done.columns else ""
+
+    html = _render(
+        m={
+            "start_cap":       round(start_cap, 2),
+            "end_cap":         round(end_cap, 2),
+            "total_profit":    total_profit,
+            "profit_pct":      profit_pct,
+            "n":               n,
+            "nw":              nw,
+            "nl":              nl,
+            "win_rate":        win_rate,
+            "avg_win":         avg_win,
+            "avg_loss":        avg_loss,
+            "pf_display":      pf_display,
+            "pf_val":          pf_val,
+            "max_dd":          max_dd,
+            "max_ws":          max_ws,
+            "max_ls":          max_ls,
+            "cur_s":           cur_s,
+            "cur_t":           cur_t,
+            "strategies_str":  strategies_str,
+            "symbols_str":     symbols_str,
+            "biggest_win":     biggest_win,
+            "biggest_loss":    biggest_loss,
+        },
+        rows=rows,
+        monthly_rows=monthly_rows,
+        eq_labels=eq_labels,
+        eq_data=eq_data,
+        profits=profits,
+        date_from=date_from,
+        date_to=date_to,
+        chartjs=chartjs,
+        lwc=lwc,
+        ohlcv_json=json.dumps(ohlcv_raw),
+        st_json=json.dumps(st_data),
+        markers_json=json.dumps(markers),
+        symbols_data=symbols_data,
+        win_streak_trades=win_streak_trades,
+        loss_streak_trades=loss_streak_trades,
+    )
+
+    html_p.write_text(html, encoding='utf-8')
     print(f"[dashboard] written -> {html_p}")
 
-    # Auto-start the server if it isn't already running
-    if not _server_up():
-        _start_chart_server()
+    # Opening a browser tab every run got old fast once algoTrader grew its
+    # own "Backtest" tab (same data, one page, no popping tabs) -- default
+    # OFF now. Set BT_OPEN_DASHBOARD=true to restore the old auto-open
+    # behavior for a plain CLI run.
+    if os.environ.get("BT_OPEN_DASHBOARD", "false").strip().lower() != "true":
+        print("[dashboard] auto-open disabled (set BT_OPEN_DASHBOARD=true to re-enable)")
+        return
 
+    # Try chart server first (reuses existing browser tab via JS auto-refresh).
+    # Fall back to opening the file directly.
     server_url = "http://localhost:8765/"
-    if _server_up():
-        webbrowser.open(server_url, new=2)
-        print(f"[dashboard] opened  -> {server_url}")
-    else:
-        print(f"[dashboard] server not reachable — open {server_url} manually after starting chart_server.py")
+    opened = False
+    try:
+        with socket.create_connection(("127.0.0.1", 8765), timeout=0.5):
+            webbrowser.open(server_url, new=2)
+            print(f"[dashboard] opened  -> {server_url}")
+            opened = True
+    except OSError:
+        pass
+
+    if not opened:
+        try:
+            import sys
+            if sys.platform == "win32":
+                os.startfile(str(html_p))
+            else:
+                webbrowser.open(html_p.as_uri(), new=2)
+            print(f"[dashboard] opened  -> {html_p}")
+        except Exception as e:
+            print(f"[dashboard] could not open browser: {e}")
 
 
+def _render(m, rows, monthly_rows, eq_labels, eq_data, profits,
+            date_from, date_to, chartjs="", lwc="", ohlcv_json="[]", st_json="[]", markers_json="[]",
+            symbols_data=None, win_streak_trades=None, loss_streak_trades=None):
 
-def _render() -> str:
-    """Return the static React dashboard shell. All analytics come from /trades."""
-    return r"""<!DOCTYPE html>
+    profit_sign  = "+" if m['total_profit'] >= 0 else "-"
+    profit_abs   = f"${abs(m['total_profit']):,.2f}"
+    profit_color = "clr-green" if m['total_profit'] >= 0 else "clr-red"
+    pct_arrow    = "&#9650;" if m['profit_pct'] >= 0 else "&#9660;"
+    pct_abs      = abs(m['profit_pct'])
+
+    end_cap_str   = f"${m['end_cap']:,.2f}"
+    start_cap_str = f"${m['start_cap']:,.2f}"
+
+    wr_color  = "clr-green" if m['win_rate'] >= 50 else "clr-red"
+    pf_color  = "clr-green" if m['pf_val'] >= 1   else "clr-red"
+    avg_w_str = f"+${m['avg_win']:.2f}"
+    avg_l_str = f"${m['avg_loss']:.2f}"
+
+    streak_hex   = "#22c55e" if m['cur_t'] == 'win' else "#ef4444"
+    streak_label = f"{m['cur_s']} {m['cur_t'].upper()}"
+
+    avg_all_val   = round(sum(profits) / len(profits), 2) if profits else 0
+    avg_all_str   = (f"+${avg_all_val:.2f}" if avg_all_val >= 0 else f"-${abs(avg_all_val):.2f}")
+    avg_all_color = "clr-green" if avg_all_val >= 0 else "clr-red"
+
+    rows_j          = json.dumps(rows)
+    monthly_rows_j  = json.dumps(monthly_rows)
+    eq_labels_j     = json.dumps(eq_labels)
+    eq_data_j       = json.dumps(eq_data)
+    profits_j       = json.dumps(profits)
+    bar_clrs_j      = json.dumps(["#22c55e" if p > 0 else "#ef4444" for p in profits])
+    symbols_data_j      = json.dumps(symbols_data or [])
+    win_streak_trades_j  = json.dumps(win_streak_trades  or [])
+    loss_streak_trades_j = json.dumps(loss_streak_trades or [])
+
+    return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<meta charset="UTF-8">
 <title>Trading Dashboard</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<script>{chartjs}</script>
+<script>{lwc}</script>
 <style>
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-body{background:#090b0f;color:#c9d1d9;font-family:'Inter',system-ui,-apple-system,sans-serif;min-height:100vh}
-@keyframes spin{to{transform:rotate(360deg)}}
-.terminal-bar{background:#0d1117;border-bottom:2px solid #d29922;padding:0 20px;display:flex;align-items:center;height:34px;position:sticky;top:0;z-index:100;gap:0}
-.tb-brand{font-size:11px;font-weight:900;letter-spacing:.18em;color:#d29922;margin-right:20px;font-family:'JetBrains Mono',monospace;white-space:nowrap}
-.tb-sep{width:1px;height:14px;background:#1c2332;margin:0 14px;flex-shrink:0}
-.tb-pill{font-size:10px;font-weight:600;letter-spacing:.08em;color:#6e7681;background:#161b22;border:1px solid #1c2332;padding:2px 8px;border-radius:2px;margin-right:5px;font-family:'JetBrains Mono',monospace;white-space:nowrap}
-.tb-pill.active{color:#d29922;border-color:rgba(210,153,34,.4)}
-.tb-right{margin-left:auto;display:flex;align-items:center;gap:10px}
-.tb-time{font-size:10px;color:#3d4451;font-family:'JetBrains Mono',monospace}
-.tb-dot{width:6px;height:6px;border-radius:50%;background:#3fb950;box-shadow:0 0 4px rgba(63,185,80,.5)}
-.page-wrap{padding:18px 22px 40px;max-width:1900px;margin:0 auto}
-.clr-green{color:#3fb950}.clr-red{color:#f85149}.clr-blue{color:#2f81f7}
-.tab-nav{display:flex;margin-bottom:18px;border-bottom:1px solid #1c2332}
-.tab-btn{padding:7px 18px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.12em;border:none;border-bottom:2px solid transparent;background:transparent;color:#3d4451;cursor:pointer;margin-bottom:-1px;transition:color .15s,border-color .15s;font-family:'Inter',sans-serif}
-.tab-btn:hover{color:#6e7681}
-.tab-btn.active{color:#e6edf3;border-bottom-color:#d29922}
-.section-block{margin-bottom:18px}
-.section-toggle{display:flex;align-items:center;justify-content:space-between;padding:8px 16px;background:#0d1117;border:1px solid #1c2332;border-radius:2px;cursor:pointer;user-select:none;transition:border-color .15s}
-.section-toggle:hover{border-color:#d29922}
-.section-block-lbl{font-size:9px;text-transform:uppercase;letter-spacing:.12em;color:#6e7681;font-weight:700;font-family:'Inter',sans-serif}
-.toggle-icon{font-size:11px;color:#3d4451;transition:transform .2s;flex-shrink:0}
-.section-block.collapsed .toggle-icon{transform:rotate(-90deg)}
-.section-body{padding-top:10px}
-.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(168px,1fr));gap:8px;margin-bottom:18px}
-.card{background:#0d1117;border:1px solid #1c2332;border-left:3px solid #2f81f7;border-radius:2px;padding:14px 16px;transition:border-left-color .15s}
-.card:hover{border-left-color:#d29922}
-.card-lbl{font-size:9px;text-transform:uppercase;letter-spacing:.12em;color:#3d4451;margin-bottom:9px;font-weight:700;font-family:'Inter',sans-serif}
-.card-val{font-size:22px;font-weight:700;line-height:1;font-family:'JetBrains Mono',monospace;letter-spacing:-.01em}
-.card-sub{font-size:10px;color:#3d4451;margin-top:6px;font-family:'JetBrains Mono',monospace}
-.streak-card{cursor:pointer}.streak-card:hover{border-left-color:#d29922 !important}
-.charts{display:grid;grid-template-columns:2.2fr 1fr;gap:8px;margin-bottom:18px}
-.chart-box{background:#0d1117;border:1px solid #1c2332;border-radius:2px;padding:16px}
-.chart-lbl{font-size:9px;text-transform:uppercase;letter-spacing:.12em;color:#3d4451;margin-bottom:12px;font-weight:700;font-family:'Inter',sans-serif}
-.btn-sm{padding:2px 10px;font-size:9px;font-weight:700;border-radius:2px;border:1px solid #1c2332;background:#090b0f;color:#3d4451;cursor:pointer;letter-spacing:.08em;font-family:'Inter',sans-serif}
-.btn-sm:hover{color:#e6edf3;border-color:#d29922}
-.tbl-box{background:#0d1117;border:1px solid #1c2332;border-radius:2px;padding:14px 18px;overflow-x:auto;margin-bottom:18px}
-.tbl-lbl{font-size:9px;text-transform:uppercase;letter-spacing:.12em;color:#3d4451;margin-bottom:10px;font-weight:700;font-family:'Inter',sans-serif}
-.tbl-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:6px}
-.filter-bar{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
-table{width:100%;border-collapse:collapse;font-size:12px}
-thead th{padding:6px 11px;text-align:left;font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:#3d4451;background:#090b0f;border-bottom:1px solid #1c2332;font-weight:700;font-family:'Inter',sans-serif}
-tbody td{padding:6px 11px;border-bottom:1px solid #0d1117;color:#6e7681;font-family:'JetBrains Mono',monospace;font-size:12px}
-tbody tr:nth-child(even) td{background:rgba(255,255,255,.013)}
-tbody tr:hover td{background:#161b22}
-tbody td.hl{color:#c9d1d9}
-tbody td.muted{color:#3d4451;font-size:11px;font-family:'Inter',sans-serif}
-.win-txt{color:#3fb950;font-weight:700}.los-txt{color:#f85149;font-weight:700}
-.mono{font-family:'JetBrains Mono',monospace}
-.strat-cell{max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;font-family:'Inter',sans-serif;color:#6e7681}
-.month-calendar{display:grid;grid-template-columns:repeat(auto-fill,minmax(138px,1fr));gap:7px;padding:2px 0}
-.month-cell{border-radius:2px;padding:12px 14px;border:1px solid;transition:transform .1s,box-shadow .1s;cursor:pointer;position:relative}
-.month-cell:hover{transform:translateY(-1px)}
-.month-cell.mc-profit{background:rgba(63,185,80,.07);border-color:rgba(63,185,80,.22)}
-.month-cell.mc-loss{background:rgba(248,81,73,.07);border-color:rgba(248,81,73,.22)}
-.month-cell.mc-active{box-shadow:0 0 0 2px #d29922;transform:translateY(-1px)}
-.mc-name{font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:#3d4451;margin-bottom:7px;font-weight:700;font-family:'Inter',sans-serif}
-.mc-pnl{font-size:18px;font-weight:700;line-height:1;margin-bottom:7px;font-family:'JetBrains Mono',monospace}
-.mc-pnl.mc-pos{color:#3fb950}.mc-pnl.mc-neg{color:#f85149}
-.mc-pct{font-size:11px;font-family:'JetBrains Mono',monospace;margin-bottom:6px;font-weight:700}
-.mc-divider{border:none;border-top:1px solid #1c2332;margin:5px 0}
-.mc-row{display:flex;justify-content:space-between;align-items:center;font-size:10px;color:#3d4451;margin-top:3px}
-.mc-lbl{font-size:9px;text-transform:uppercase;letter-spacing:.06em;font-family:'Inter',sans-serif}
-.mc-val{font-weight:700;font-size:11px;font-family:'JetBrains Mono',monospace}
-.mc-val.c-trades{color:#2f81f7}.mc-val.c-wins{color:#3fb950}.mc-val.c-losses{color:#f85149}
-.cal-tooltip{position:fixed;background:#0d1117;border:1px solid #d29922;border-radius:4px;padding:12px 14px;min-width:360px;max-height:320px;overflow-y:auto;pointer-events:none;z-index:1000;box-shadow:0 8px 32px rgba(0,0,0,.7)}
-.ct-title{font-size:10px;font-weight:700;color:#d29922;letter-spacing:.1em;text-transform:uppercase;margin-bottom:8px;font-family:'JetBrains Mono',monospace}
-.ct-tbl{width:100%;border-collapse:collapse;font-size:11px}
-.ct-tbl thead th{text-align:left;color:#3d4451;font-weight:700;padding-bottom:4px;font-size:9px;letter-spacing:.08em;text-transform:uppercase;font-family:'Inter',sans-serif}
-.ct-tbl tbody td{padding:2px 6px 2px 0;border:none;color:#6e7681}
-.sym-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(195px,1fr));gap:8px;margin-bottom:18px}
-.sym-card{background:#0d1117;border:1px solid #1c2332;border-left:3px solid;border-radius:2px;padding:14px 16px;position:relative;overflow:hidden}
-.sym-name{font-size:11px;font-weight:900;letter-spacing:.12em;margin-bottom:9px;font-family:'JetBrains Mono',monospace}
-.sym-pnl{font-size:20px;font-weight:700;line-height:1;margin-bottom:3px;font-family:'JetBrains Mono',monospace}
-.sym-pct{font-size:10px;color:#3d4451;margin-bottom:11px;font-family:'JetBrains Mono',monospace}
-.sym-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;padding-top:9px;border-top:1px solid #1c2332}
-.sym-stat-item{text-align:center}
-.sym-stat-val{font-size:13px;font-weight:700;line-height:1;margin-bottom:2px;font-family:'JetBrains Mono',monospace}
-.sym-stat-lbl{font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:#3d4451;font-family:'Inter',sans-serif}
-.sym-badge{display:inline-block;padding:1px 7px;border-radius:2px;font-size:10px;font-weight:800;letter-spacing:.08em;border:1px solid;font-family:'JetBrains Mono',monospace}
-.sym-table-wrap{background:#0d1117;border:1px solid #1c2332;border-radius:2px;padding:14px 18px;margin-bottom:18px;overflow-x:auto}
-.sym-tbl{width:100%;border-collapse:collapse;font-size:12px}
-.sym-tbl thead th{padding:6px 11px;text-align:left;font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:#3d4451;background:#090b0f;border-bottom:1px solid #1c2332;font-weight:700;font-family:'Inter',sans-serif}
-.sym-tbl tbody td{padding:6px 11px;border-bottom:1px solid #0d1117;color:#6e7681;font-family:'JetBrains Mono',monospace}
-.sym-tbl tbody tr:hover td{background:#161b22}
-.sym-tbl tfoot td{padding:7px 11px;border-top:1px solid #1c2332;font-weight:700;font-size:12px;color:#c9d1d9;background:#090b0f;font-family:'JetBrains Mono',monospace}
-.modal-overlay{display:flex;position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:999;align-items:center;justify-content:center}
-.modal-box{background:#0d1117;border:1px solid #1c2332;border-top:2px solid #d29922;border-radius:2px;padding:22px 26px;width:min(820px,92vw);max-height:82vh;overflow-y:auto;position:relative}
-.modal-title{font-size:13px;font-weight:700;margin-bottom:3px;font-family:'JetBrains Mono',monospace}
-.modal-sub{font-size:10px;color:#3d4451;margin-bottom:16px;font-family:'Inter',sans-serif}
-.modal-close{position:absolute;top:14px;right:16px;background:none;border:none;color:#3d4451;font-size:18px;cursor:pointer;line-height:1}
-.modal-close:hover{color:#c9d1d9}
-.modal-tbl{width:100%;border-collapse:collapse;font-size:12px}
-.modal-tbl thead th{padding:6px 11px;text-align:left;font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:#3d4451;background:#090b0f;border-bottom:1px solid #1c2332;font-family:'Inter',sans-serif}
-.modal-tbl tbody td{padding:6px 11px;border-bottom:1px solid #0d1117;color:#6e7681;font-family:'JetBrains Mono',monospace}
-.modal-tbl tbody tr:hover td{background:#161b22}
-.candle-wrap{background:#0d1117;border:1px solid #1c2332;border-radius:2px;padding:16px;margin-bottom:18px}
-.candle-toolbar{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap}
-.candle-title{font-size:9px;text-transform:uppercase;letter-spacing:.12em;color:#3d4451;flex:1;display:flex;align-items:center;gap:8px;font-weight:700;font-family:'Inter',sans-serif}
-.status-dot{width:6px;height:6px;border-radius:50%;background:#1c2332;display:inline-block;flex-shrink:0;transition:background .4s}
-.status-dot.live{background:#3fb950;box-shadow:0 0 5px rgba(63,185,80,.5)}
-.btn-toggle{padding:4px 12px;font-size:10px;font-weight:700;border-radius:2px;border:1px solid #1c2332;background:#090b0f;color:#3d4451;cursor:pointer;letter-spacing:.06em;transition:all .15s;font-family:'Inter',sans-serif}
-.btn-toggle.on{background:rgba(47,129,247,.1);border-color:#2f81f7;color:#2f81f7}
-@media(max-width:900px){.charts{grid-template-columns:1fr}.cards{grid-template-columns:repeat(auto-fill,minmax(140px,1fr))}}
-@media(max-width:600px){.page-wrap{padding:10px 12px 28px}.cards{grid-template-columns:repeat(2,1fr)}.card-val{font-size:18px}.tb-pill{display:none}.tb-sep{display:none}}
+*,*::before,*::after{{box-sizing:border-box;margin:0;padding:0}}
+body{{background:#090b0f;color:#c9d1d9;font-family:'Segoe UI',system-ui,-apple-system,sans-serif;min-height:100vh}}
+
+/* ── Bloomberg-style terminal bar ── */
+.terminal-bar{{background:#0d1117;border-bottom:2px solid #d29922;padding:0 20px;display:flex;align-items:center;height:34px;position:sticky;top:0;z-index:100;gap:0}}
+.tb-brand{{font-size:11px;font-weight:900;letter-spacing:.18em;color:#d29922;margin-right:20px;font-family:'Courier New',monospace;white-space:nowrap}}
+.tb-sep{{width:1px;height:14px;background:#1c2332;margin:0 14px;flex-shrink:0}}
+.tb-pill{{font-size:10px;font-weight:600;letter-spacing:.08em;color:#6e7681;background:#161b22;border:1px solid #1c2332;padding:2px 8px;border-radius:2px;margin-right:5px;font-family:'Courier New',monospace;white-space:nowrap}}
+.tb-pill.active{{color:#d29922;border-color:rgba(210,153,34,.4)}}
+.tb-right{{margin-left:auto;display:flex;align-items:center;gap:10px}}
+.tb-time{{font-size:10px;color:#3d4451;font-family:'Courier New',monospace}}
+.tb-dot{{width:6px;height:6px;border-radius:50%;background:#3fb950;box-shadow:0 0 4px rgba(63,185,80,.5)}}
+
+/* ── Main layout ── */
+.page-wrap{{padding:18px 22px 40px;max-width:1900px;margin:0 auto}}
+.page-title{{font-size:14px;font-weight:700;color:#e6edf3;letter-spacing:.02em}}
+.page-sub{{font-size:10px;color:#3d4451;margin-top:3px;margin-bottom:18px;font-family:'Courier New',monospace}}
+.clr-green{{color:#3fb950}}.clr-red{{color:#f85149}}.clr-blue{{color:#2f81f7}}
+
+/* ── Tabs ── */
+.tab-nav{{display:flex;margin-bottom:18px;border-bottom:1px solid #1c2332}}
+.tab-btn{{padding:7px 18px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.12em;border:none;border-bottom:2px solid transparent;background:transparent;color:#3d4451;cursor:pointer;margin-bottom:-1px;transition:color .15s,border-color .15s}}
+.tab-btn:hover{{color:#6e7681}}
+.tab-btn.active{{color:#e6edf3;border-bottom-color:#d29922}}
+.tab-pane{{display:none}}.tab-pane.active{{display:block}}
+
+/* ── Section header ── */
+.section-hdr{{display:flex;align-items:baseline;gap:12px;margin-bottom:10px}}
+.section-lbl{{font-size:9px;text-transform:uppercase;letter-spacing:.12em;color:#3d4451;font-weight:700}}
+.section-sub{{font-size:10px;color:#3d4451;font-family:'Courier New',monospace}}
+
+/* ── Metric cards ── */
+.cards{{display:grid;grid-template-columns:repeat(auto-fill,minmax(165px,1fr));gap:8px;margin-bottom:18px}}
+.card{{background:#0d1117;border:1px solid #1c2332;border-left:3px solid #2f81f7;border-radius:2px;padding:14px 16px;transition:border-left-color .15s}}
+.card:hover{{border-left-color:#d29922}}
+.card-lbl{{font-size:9px;text-transform:uppercase;letter-spacing:.12em;color:#3d4451;margin-bottom:9px;font-weight:700}}
+.card-val{{font-size:22px;font-weight:700;line-height:1;font-family:'Courier New',Courier,monospace;letter-spacing:-.01em}}
+.card-sub{{font-size:10px;color:#3d4451;margin-top:6px;font-family:'Courier New',monospace}}
+.bw-meta{{font-size:9px;line-height:1.5;word-break:break-word}}
+
+/* ── Charts ── */
+.charts{{display:grid;grid-template-columns:2.2fr 1fr;gap:8px;margin-bottom:18px}}
+.chart-box{{background:#0d1117;border:1px solid #1c2332;border-radius:2px;padding:16px}}
+.chart-lbl{{font-size:9px;text-transform:uppercase;letter-spacing:.12em;color:#3d4451;margin-bottom:12px;font-weight:700}}
+
+/* ── Table boxes ── */
+.tbl-box{{background:#0d1117;border:1px solid #1c2332;border-radius:2px;padding:14px 18px;overflow-x:auto;margin-bottom:18px}}
+.tbl-lbl{{font-size:9px;text-transform:uppercase;letter-spacing:.12em;color:#3d4451;margin-bottom:10px;font-weight:700}}
+table{{width:100%;border-collapse:collapse;font-size:12px}}
+thead th{{padding:6px 11px;text-align:left;font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:#3d4451;background:#090b0f;border-bottom:1px solid #1c2332;font-weight:700}}
+tbody td{{padding:6px 11px;border-bottom:1px solid #0d1117;color:#6e7681;font-family:'Courier New',monospace;font-size:12px}}
+tbody tr:nth-child(even) td{{background:rgba(255,255,255,.013)}}
+tbody tr:hover td{{background:#161b22}}
+tbody td.hl{{color:#c9d1d9}}
+tbody td.muted{{color:#3d4451;font-size:11px;font-family:'Segoe UI',system-ui,sans-serif}}
+
+/* ── Badges ── */
+.badge{{display:inline-block;padding:1px 7px;border-radius:2px;font-size:10px;font-weight:700;letter-spacing:.06em}}
+.b-long{{background:rgba(63,185,80,.1);color:#3fb950;border:1px solid rgba(63,185,80,.28)}}
+.b-short{{background:rgba(248,81,73,.1);color:#f85149;border:1px solid rgba(248,81,73,.28)}}
+.b-tp{{background:rgba(47,129,247,.1);color:#2f81f7;border:1px solid rgba(47,129,247,.28)}}
+.b-sl{{background:rgba(248,81,73,.1);color:#f85149;border:1px solid rgba(248,81,73,.28)}}
+.b-st{{background:rgba(188,140,255,.1);color:#bc8cff;border:1px solid rgba(188,140,255,.28)}}
+.b-rr{{background:rgba(63,185,80,.1);color:#3fb950;border:1px solid rgba(63,185,80,.28)}}
+.b-rev{{background:rgba(210,153,34,.1);color:#d29922;border:1px solid rgba(210,153,34,.28)}}
+.win-txt{{color:#3fb950;font-weight:700}}.los-txt{{color:#f85149;font-weight:700}}
+
+/* ── Filters ── */
+.tbl-hdr{{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:6px}}
+.filter-bar{{display:flex;align-items:center;gap:5px;flex-wrap:wrap}}
+.month-select{{background:#090b0f;color:#6e7681;border:1px solid #1c2332;border-radius:2px;padding:3px 8px;font-size:10px;cursor:pointer;outline:none;font-family:'Courier New',monospace}}
+.month-select:hover{{border-color:#d29922;color:#c9d1d9}}
+.month-select option{{background:#090b0f}}
+
+/* ── Monthly calendar ── */
+.month-calendar{{display:grid;grid-template-columns:repeat(auto-fill,minmax(138px,1fr));gap:7px;padding:2px 0}}
+.month-cell{{border-radius:2px;padding:12px 14px;border:1px solid;transition:transform .1s;cursor:default}}
+.month-cell:hover{{transform:translateY(-1px)}}
+.month-cell.mc-profit{{background:rgba(63,185,80,.07);border-color:rgba(63,185,80,.22)}}
+.month-cell.mc-loss{{background:rgba(248,81,73,.07);border-color:rgba(248,81,73,.22)}}
+.mc-name{{font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:#3d4451;margin-bottom:7px;font-weight:700}}
+.mc-pnl{{font-size:18px;font-weight:700;line-height:1;margin-bottom:7px;font-family:'Courier New',monospace}}
+.mc-pnl.mc-pos{{color:#3fb950}}.mc-pnl.mc-neg{{color:#f85149}}
+.mc-divider{{border:none;border-top:1px solid #1c2332;margin:5px 0}}
+.mc-row{{display:flex;justify-content:space-between;align-items:center;font-size:10px;color:#3d4451;margin-top:3px}}
+.mc-lbl{{font-size:9px;text-transform:uppercase;letter-spacing:.06em}}
+.mc-val{{font-weight:700;font-size:11px;font-family:'Courier New',monospace}}
+.mc-val.c-trades{{color:#2f81f7}}.mc-val.c-wins{{color:#3fb950}}.mc-val.c-losses{{color:#f85149}}
+
+/* ── Symbol section ── */
+.sym-section-hdr{{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}}
+.sym-section-lbl{{font-size:9px;text-transform:uppercase;letter-spacing:.12em;color:#3d4451;font-weight:700}}
+.sym-cards{{display:grid;grid-template-columns:repeat(auto-fill,minmax(195px,1fr));gap:8px;margin-bottom:18px}}
+.sym-card{{background:#0d1117;border:1px solid #1c2332;border-left:3px solid;border-radius:2px;padding:14px 16px;position:relative;overflow:hidden}}
+.sym-card::before{{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,var(--sc),transparent);opacity:.3}}
+.sym-name{{font-size:11px;font-weight:900;letter-spacing:.12em;color:var(--sc);margin-bottom:9px;font-family:'Courier New',monospace}}
+.sym-pnl{{font-size:20px;font-weight:700;line-height:1;margin-bottom:3px;font-family:'Courier New',monospace}}
+.sym-pct{{font-size:10px;color:#3d4451;margin-bottom:11px;font-family:'Courier New',monospace}}
+.sym-stats{{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;padding-top:9px;border-top:1px solid #1c2332}}
+.sym-stat-item{{text-align:center}}
+.sym-stat-val{{font-size:13px;font-weight:700;line-height:1;margin-bottom:2px;font-family:'Courier New',monospace}}
+.sym-stat-lbl{{font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:#3d4451}}
+.sym-badge{{display:inline-block;padding:1px 7px;border-radius:2px;font-size:10px;font-weight:800;letter-spacing:.08em;border:1px solid;font-family:'Courier New',monospace}}
+
+/* ── Symbol table ── */
+.sym-table-wrap{{background:#0d1117;border:1px solid #1c2332;border-radius:2px;padding:14px 18px;margin-bottom:18px;overflow-x:auto}}
+.sym-table-lbl{{font-size:9px;text-transform:uppercase;letter-spacing:.12em;color:#3d4451;margin-bottom:10px;font-weight:700}}
+.sym-tbl{{width:100%;border-collapse:collapse;font-size:12px}}
+.sym-tbl thead th{{padding:6px 11px;text-align:left;font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:#3d4451;background:#090b0f;border-bottom:1px solid #1c2332;font-weight:700}}
+.sym-tbl tbody td{{padding:6px 11px;border-bottom:1px solid #0d1117;color:#6e7681;font-family:'Courier New',monospace}}
+.sym-tbl tbody tr:hover td{{background:#161b22}}
+.sym-tbl tfoot td{{padding:7px 11px;border-top:1px solid #1c2332;font-weight:700;font-size:12px;color:#c9d1d9;background:#090b0f;font-family:'Courier New',monospace}}
+
+/* ── Streak modal ── */
+.modal-overlay{{display:none;position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:999;align-items:center;justify-content:center}}
+.modal-overlay.open{{display:flex}}
+.modal-box{{background:#0d1117;border:1px solid #1c2332;border-top:2px solid #d29922;border-radius:2px;padding:22px 26px;width:min(820px,92vw);max-height:82vh;overflow-y:auto;position:relative}}
+.modal-title{{font-size:13px;font-weight:700;color:#e6edf3;margin-bottom:3px;font-family:'Courier New',monospace}}
+.modal-sub{{font-size:10px;color:#3d4451;margin-bottom:16px}}
+.modal-close{{position:absolute;top:14px;right:16px;background:none;border:none;color:#3d4451;font-size:18px;cursor:pointer;line-height:1}}
+.modal-close:hover{{color:#c9d1d9}}
+.modal-tbl{{width:100%;border-collapse:collapse;font-size:12px}}
+.modal-tbl thead th{{padding:6px 11px;text-align:left;font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:#3d4451;background:#090b0f;border-bottom:1px solid #1c2332}}
+.modal-tbl tbody td{{padding:6px 11px;border-bottom:1px solid #0d1117;color:#6e7681;font-family:'Courier New',monospace}}
+.modal-tbl tbody tr:hover td{{background:#161b22}}
+.streak-card{{cursor:pointer}}
+.streak-card:hover{{border-left-color:#d29922 !important}}
+
+/* ── Candle chart ── */
+.candle-wrap{{background:#0d1117;border:1px solid #1c2332;border-radius:2px;padding:16px;margin-bottom:18px}}
+.candle-toolbar{{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap}}
+.candle-title{{font-size:9px;text-transform:uppercase;letter-spacing:.12em;color:#3d4451;flex:1;display:flex;align-items:center;gap:8px;font-weight:700}}
+.status-dot{{width:6px;height:6px;border-radius:50%;background:#1c2332;display:inline-block;flex-shrink:0;transition:background .4s}}
+.status-dot.live{{background:#3fb950;box-shadow:0 0 5px rgba(63,185,80,.5)}}
+.btn-toggle{{padding:4px 12px;font-size:10px;font-weight:700;border-radius:2px;border:1px solid #1c2332;background:#090b0f;color:#3d4451;cursor:pointer;letter-spacing:.06em;transition:all .15s}}
+.btn-toggle.on{{background:rgba(47,129,247,.1);border-color:#2f81f7;color:#2f81f7}}
+#candleChart{{width:100%;height:520px;overflow:hidden}}
+
+/* ── Responsive ── */
+@media(max-width:900px){{
+  .charts{{grid-template-columns:1fr}}
+  .cards{{grid-template-columns:repeat(auto-fill,minmax(140px,1fr))}}
+  .sym-cards{{grid-template-columns:repeat(auto-fill,minmax(155px,1fr))}}
+}}
+@media(max-width:600px){{
+  .page-wrap{{padding:10px 12px 28px}}
+  .cards{{grid-template-columns:repeat(2,1fr)}}
+  .card-val{{font-size:18px}}
+  .tb-pill{{display:none}}
+  .tb-sep{{display:none}}
+  #candleChart{{height:380px}}
+}}
 </style>
 </head>
 <body>
-<div id="root">
-  <div style="display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:12px">
-    <div style="width:28px;height:28px;border:2px solid #1c2332;border-top:2px solid #d29922;border-radius:50%;animation:spin 1s linear infinite"></div>
-    <div style="font-size:11px;color:#3d4451;letter-spacing:.12em;text-transform:uppercase;font-family:'JetBrains Mono',monospace">Loading…</div>
+
+<div class="terminal-bar">
+  <span class="tb-brand">ALGO · TERMINAL</span>
+  <div class="tb-sep"></div>
+  <span class="tb-pill active">{m['strategies_str'] or 'Strategy'}</span>
+  <span class="tb-pill">{m['symbols_str'] or 'Symbol'}</span>
+  <span class="tb-pill">{m['n']} trades</span>
+  <span class="tb-pill">{date_from[:10]} → {date_to[:10]}</span>
+  <div class="tb-right">
+    <span class="tb-time" id="tbTime"></span>
+    <div class="tb-dot" title="System active"></div>
   </div>
 </div>
-<script>
-const SERVER='http://localhost:8765';
-function loadScript(src,fb){return new Promise((res,rej)=>{const s=document.createElement('script');s.src=src;s.onload=res;s.onerror=fb?()=>{const s2=document.createElement('script');s2.src=fb;s2.onload=res;s2.onerror=rej;document.head.appendChild(s2);}:rej;document.head.appendChild(s);});}
-Promise.all([
-  loadScript(SERVER+'/static/preact.js','https://unpkg.com/preact@10/dist/preact.umd.js'),
-  loadScript(SERVER+'/static/preact-hooks.js','https://unpkg.com/preact@10/hooks/dist/hooks.umd.js'),
-  loadScript(SERVER+'/static/htm.js','https://unpkg.com/htm@3/dist/htm.umd.js'),
-  loadScript(SERVER+'/static/chartjs.js','https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js'),
-]).then(()=>initApp()).catch(()=>{document.getElementById('root').innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:12px;color:#f85149;font-family:Inter,sans-serif"><div style="font-size:28px">⚡</div><div style="font-size:14px">Could not load libraries. Is chart_server.py running?</div></div>';});
-function initApp(){
-const {h,render,Fragment}=preact;
-const {useState,useEffect,useRef,useMemo}=preactHooks;
-const html=htm.bind(h);
-const SC={XAUUSD:'#f59e0b',EURUSD:'#3b82f6',GBPUSD:'#8b5cf6',USDJPY:'#22c55e',XAGUSD:'#06b6d4',USDCHF:'#f97316',BTCUSD:'#f97316'};
-const FB=['#a78bfa','#34d399','#fb7185','#38bdf8','#facc15','#e879f9'];
-let _si=0;const _cc={};
-function sClr(s){return _cc[s]=_cc[s]||SC[s]||FB[_si++%FB.length];}
-function fP(v){return(v>=0?'+$':'-$')+Math.abs(v).toFixed(2);}
-function fC(v){return'$'+v.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});}
-function Chip({sym}){const c=sClr(sym);return html`<span style=${{display:'inline-block',padding:'1px 7px',borderRadius:'2px',fontSize:'10px',fontWeight:700,letterSpacing:'.06em',border:'1px solid',color:c,borderColor:c+'55',background:c+'18',fontFamily:"'JetBrains Mono',monospace"}}>${sym}</span>`;}
-function Badge({label}){
-  const M={LONG:{bg:'rgba(63,185,80,.12)',clr:'#3fb950',b:'rgba(63,185,80,.3)'},SHORT:{bg:'rgba(248,81,73,.12)',clr:'#f85149',b:'rgba(248,81,73,.3)'},TP:{bg:'rgba(47,129,247,.12)',clr:'#2f81f7',b:'rgba(47,129,247,.3)'},SL:{bg:'rgba(248,81,73,.12)',clr:'#f85149',b:'rgba(248,81,73,.3)'},'R:R':{bg:'rgba(63,185,80,.12)',clr:'#3fb950',b:'rgba(63,185,80,.3)'},ST:{bg:'rgba(188,140,255,.12)',clr:'#bc8cff',b:'rgba(188,140,255,.3)'},REV:{bg:'rgba(210,153,34,.12)',clr:'#d29922',b:'rgba(210,153,34,.3)'}};
-  const s=M[label]||M.SL;const d=label==='R:R'?'R:R':label==='ST'?'Supertrend':label==='REV'?'Rev Engulf':label;
-  return html`<span style=${{display:'inline-block',padding:'1px 7px',borderRadius:'2px',fontSize:'10px',fontWeight:700,letterSpacing:'.06em',border:'1px solid',color:s.clr,borderColor:s.b,background:s.bg,fontFamily:"'JetBrains Mono',monospace"}}>${d}</span>`;}
-function Card({lbl,val,valStyle,sub,onClick,className}){return html`<div class=${'card'+(className?' '+className:'')} onclick=${onClick} style=${onClick?{cursor:'pointer'}:{}}><div class="card-lbl">${lbl}</div><div class="card-val" style=${valStyle||{}}>${val}</div>${sub?html`<div class="card-sub">${sub}</div>`:null}</div>`;}
-function SBlock({title,children,open:initOpen=true}){const [o,setO]=useState(initOpen);return html`<div class=${'section-block'+(o?'':' collapsed')}><div class="section-toggle" onclick=${()=>setO(x=>!x)}><span class="section-block-lbl">${title}</span><span class="toggle-icon">▼</span></div><div class="section-body">${o?children:null}</div></div>`;}
-function EqChart({labels,data}){
-  const r=useRef(null);const inst=useRef(null);const s=useRef(0);const e=useRef(data.length-1);const dg=useRef({});
-  function draw(s0,e0){if(!r.current||typeof Chart==='undefined')return;if(inst.current){inst.current.destroy();inst.current=null;}
-    const lb=labels.slice(s0,e0+1).map(l=>{if(l==='Start')return'Start';const d=new Date(l.replace(' ','T'));return isNaN(d)?l:d.toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'2-digit'});});
-    inst.current=new Chart(r.current,{type:'line',data:{labels:lb,datasets:[{data:data.slice(s0,e0+1),borderColor:'#3b82f6',backgroundColor:'rgba(59,130,246,.06)',borderWidth:2,pointRadius:0,fill:true,tension:0.35}]},options:{animation:false,plugins:{legend:{display:false}},scales:{x:{display:true,grid:{color:'#1a2540'},ticks:{color:'#334155',maxRotation:40,autoSkip:true,maxTicksLimit:8}},y:{grid:{color:'#1a2540'},ticks:{color:'#334155',callback:v=>'$'+v.toLocaleString()}}}}});}
-  useEffect(()=>{draw(0,data.length-1);return()=>{if(inst.current)inst.current.destroy();};},[]);
-  function wh(ev){ev.preventDefault();const tot=data.length-1;const rng=e.current-s.current;const ctr=Math.round(s.current+rng/2);const f=ev.deltaY<0?0.65:1.55;const nr=Math.max(4,Math.min(tot,Math.round(rng*f)));const half=Math.round(nr/2);let ns=Math.max(0,ctr-half);let ne=Math.min(tot,ns+nr);if(ne===tot)ns=Math.max(0,tot-nr);s.current=ns;e.current=ne;draw(ns,ne);}
-  function md(ev){dg.current={x:ev.clientX,s:s.current,e:e.current};}
-  function mm(ev){if(!dg.current.x)return;const tot=data.length-1;const rng=dg.current.e-dg.current.s;const sh=-Math.round((ev.clientX-dg.current.x)/(r.current?.clientWidth||600)*rng);const ns=Math.max(0,Math.min(tot-rng,dg.current.s+sh));const ne=Math.min(tot,ns+rng);s.current=ns;e.current=ne;draw(ns,ne);}
-  function mu(){dg.current={};}
-  return html`<div><div class="chart-lbl" style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'8px'}}><span>Equity Curve <span style=${{fontSize:'9px',color:'#2d3a4a',fontWeight:400,marginLeft:'6px'}}>scroll=zoom · drag=pan</span></span><button class="btn-sm" onclick=${()=>{s.current=0;e.current=data.length-1;draw(0,data.length-1);}}>RESET</button></div><canvas ref=${r} height="110" style=${{cursor:'grab'}} onWheel=${wh} onMouseDown=${md} onMouseMove=${mm} onMouseUp=${mu} onMouseLeave=${mu}/></div>`;}
-function PlChart({profits}){const r=useRef(null);useEffect(()=>{if(!r.current||typeof Chart==='undefined')return;const c=new Chart(r.current,{type:'bar',data:{labels:profits.map((_,i)=>'#'+(i+1)),datasets:[{data:profits,backgroundColor:profits.map(p=>p>0?'#22c55e':'#ef4444'),borderRadius:2}]},options:{animation:false,plugins:{legend:{display:false}},scales:{x:{display:false},y:{grid:{color:'#1a2540'},ticks:{color:'#334155',callback:v=>'$'+v}}}}});return()=>c.destroy();},[]);return html`<canvas ref=${r} height="110"/>`;}
-function CalTooltip({row,pos,onClose}){
-  if(!pos)return null;
-  const left=Math.min(pos.x+12,window.innerWidth-430);const top=Math.min(pos.y+12,window.innerHeight-400);
-  const trades=row.trade_list||[];
-  return html`<div class="cal-tooltip" style=${{left:left+'px',top:top+'px'}} onClick=${e=>e.stopPropagation()}><div class="ct-title" style=${{display:'flex',alignItems:'center',justifyContent:'space-between'}}><span>${row.month||row.week} — ${trades.length} trades</span><button onClick=${onClose} style=${{background:'none',border:'none',color:'#6e7681',cursor:'pointer',fontSize:'14px',lineHeight:1,padding:'0 2px',marginLeft:'12px'}} title="Close">✕</button></div><table class="ct-tbl"><thead><tr><th>Date</th><th>Instrument</th><th>Strategy</th><th>Dir</th><th>Lot</th><th style=${{textAlign:'right'}}>P&L</th></tr></thead><tbody>${trades.map((t,i)=>html`<tr key=${i}><td class="mono" style=${{color:'#6e7681',paddingRight:'8px'}}>${t.time.slice(0,10)}</td><td style=${{paddingRight:'8px'}}><${Chip} sym=${t.symbol}/></td><td class="strat-cell" style=${{paddingRight:'8px'}}>${t.strategy}</td><td style=${{paddingRight:'8px'}}><${Badge} label=${t.dir}/></td><td class="mono" style=${{paddingRight:'8px',color:'#94a3b8'}}>${t.lot||'—'}</td><td class="mono" style=${{textAlign:'right',color:t.profit>=0?'#3fb950':'#f85149',fontWeight:600}}>${fP(t.profit)}</td></tr>`)}</tbody></table></div>`;}
-function CalCell({row,field}){
-  const [pos,setPos]=useState(null);const p=row.profit>=0;
-  useEffect(()=>{if(!pos)return;const close=()=>setPos(null);document.addEventListener('click',close);return()=>document.removeEventListener('click',close);},[pos]);
-  return html`<${Fragment}><div class=${'month-cell '+(p?'mc-profit':'mc-loss')+(pos?' mc-active':'')} style=${{cursor:'pointer'}} onClick=${e=>{e.stopPropagation();setPos(v=>v?null:{x:e.clientX,y:e.clientY});}}><div class="mc-name">${row[field]}</div><div class=${'mc-pnl '+(p?'mc-pos':'mc-neg')}>${fP(row.profit)}</div><div class="mc-pct" style=${{color:p?'#3fb950':'#f85149'}}>${(p?'▲ ':'▼ ')+Math.abs(row.profit_pct).toFixed(2)+'%'}</div><hr class="mc-divider"/><div class="mc-row"><span class="mc-lbl">Trades</span><span class="mc-val c-trades">${row.trades}</span></div><div class="mc-row"><span class="mc-lbl">Wins</span><span class="mc-val c-wins">${row.wins}</span></div><div class="mc-row"><span class="mc-lbl">Losses</span><span class="mc-val c-losses">${row.losses}</span></div><div class="mc-row"><span class="mc-lbl">Win Rate</span><span class="mc-val" style=${{color:row.win_rate>=50?'#3fb950':'#f85149'}}>${row.win_rate}%</span></div></div>${pos?html`<${CalTooltip} row=${row} pos=${pos} onClose=${()=>setPos(null)}/>`:null}</${Fragment}>`;}
-function SymCard({s}){const c=sClr(s.symbol);const p=s.profit>=0;return html`<div class="sym-card" style=${{borderLeftColor:c}}><div class="sym-name" style=${{color:c}}>${s.symbol}</div><div class="sym-pnl" style=${{color:p?'#22c55e':'#ef4444'}}>${fP(s.profit)}</div><div class="sym-pct">${(p?'▲':'▼')+' '+Math.abs(s.profit_pct).toFixed(2)+'%'}</div><div class="sym-stats"><div class="sym-stat-item"><div class="sym-stat-val" style=${{color:'#60a5fa'}}>${s.trades}</div><div class="sym-stat-lbl">Trades</div></div><div class="sym-stat-item"><div class="sym-stat-val" style=${{color:s.win_rate>=50?'#22c55e':'#ef4444'}}>${s.win_rate}%</div><div class="sym-stat-lbl">Win Rate</div></div><div class="sym-stat-item"><div class="sym-stat-val"><span style=${{color:'#22c55e'}}>${s.wins}</span><span style=${{color:'#475569'}}> / </span><span style=${{color:'#ef4444'}}>${s.losses}</span></div><div class="sym-stat-lbl">W / L</div></div></div></div>`;}
-function TradeLog({rows}){
-  const [mo,setMo]=useState('all');const [sy,setSy]=useState('all');const [st,setSt]=useState('all');
-  const months=useMemo(()=>{const seen={},ord=[];rows.forEach(r=>{const m=r.time.substring(0,7);if(!seen[m]){seen[m]=new Date(r.time).toLocaleString('en-GB',{month:'short',year:'numeric'});ord.push(m);}});return ord.map(m=>({val:m,lbl:seen[m]}));},[rows]);
-  const syms=useMemo(()=>[...new Set(rows.map(r=>r.symbol).filter(Boolean))].sort(),[rows]);
-  const strats=useMemo(()=>[...new Set(rows.map(r=>r.strategy).filter(Boolean))].sort(),[rows]);
-  const fl=useMemo(()=>{let l=rows;if(mo!=='all')l=l.filter(r=>r.time.startsWith(mo));if(sy!=='all')l=l.filter(r=>r.symbol===sy);if(st!=='all')l=l.filter(r=>r.strategy===st);return l;},[rows,mo,sy,st]);
-  const sel={background:'#090b0f',color:'#6e7681',border:'1px solid #1c2332',borderRadius:'2px',padding:'3px 8px',fontSize:'10px',cursor:'pointer',outline:'none',fontFamily:"'JetBrains Mono',monospace"};
-  return html`<div><div class="tbl-hdr"><div class="tbl-lbl" style=${{marginBottom:0}}>Trade Log <span style=${{color:'#3d4451',fontWeight:400}}>(${fl.length})</span></div><div class="filter-bar"><select value=${st} onChange=${e=>setSt(e.target.value)} style=${sel}><option value="all">All Strategies</option>${strats.map(s=>html`<option key=${s} value=${s}>${s}</option>`)}</select><select value=${sy} onChange=${e=>setSy(e.target.value)} style=${sel}><option value="all">All Symbols</option>${syms.map(s=>html`<option key=${s} value=${s}>${s}</option>`)}</select><select value=${mo} onChange=${e=>setMo(e.target.value)} style=${sel}><option value="all">All Months</option>${months.map(m=>html`<option key=${m.val} value=${m.val}>${m.lbl}</option>`)}</select></div></div><table><thead><tr><th>#</th><th>Exit Time</th><th>Symbol</th><th>Strategy</th><th>Dir</th><th>Entry</th><th>SL</th><th>Target</th><th>Exit</th><th>Closed By</th><th>Lot</th><th>P&L</th><th>Capital</th></tr></thead><tbody>${fl.map(r=>html`<tr key=${r.num}><td class="muted">${r.num}</td><td class="muted">${r.time}</td><td><${Chip} sym=${r.symbol}/></td><td class="muted" style=${{fontSize:'11px'}}>${r.strategy||'—'}</td><td><${Badge} label=${r.dir}/></td><td class="hl">${r.entry}</td><td class="clr-red">${r.sl}</td><td style=${{color:'#a78bfa'}}>${r.target}</td><td class="hl">${r.exit}</td><td><${Badge} label=${r.label||'SL'}/></td><td class="muted">${r.lot}</td><td class=${r.profit>=0?'win-txt':'los-txt'}>${fP(r.profit)}</td><td style=${{color:'#60a5fa'}}>${fC(r.cap)}</td></tr>`)}</tbody></table></div>`;}
-function StreakModal({type,trades,onClose}){if(!type)return null;const clr=type==='win'?'#22c55e':'#ef4444';return html`<div class="modal-overlay" onclick=${e=>e.target===e.currentTarget&&onClose()}><div class="modal-box"><button class="modal-close" onclick=${onClose}>✕</button><div class="modal-title" style=${{color:clr}}>${type==='win'?'Max Win Streak':'Max Loss Streak'}</div><div class="modal-sub">${trades.length} consecutive ${type==='win'?'winning':'losing'} trades</div><table class="modal-tbl"><thead><tr><th>#</th><th>Exit Time</th><th>Symbol</th><th>Dir</th><th>Entry</th><th>Exit</th><th>P&L</th><th>Capital</th></tr></thead><tbody>${trades.map((t,i)=>html`<tr key=${i}><td class="muted">${i+1}</td><td class="muted">${t.time}</td><td><${Chip} sym=${t.symbol}/></td><td><${Badge} label=${t.dir}/></td><td class="hl">${t.entry}</td><td class="hl">${t.exit}</td><td class=${t.profit>0?'win-txt':'los-txt'}>${fP(t.profit)}</td><td style=${{color:'#60a5fa'}}>${fC(t.cap)}</td></tr>`)}</tbody></table></div></div>`;}
-function CandlesPane({visible}){
-  const cR=useRef(null);const chR=useRef(null);const csR=useRef(null);const stR=useRef(null);
-  const stV=useRef(true);const [stL,setStL]=useState('Supertrend ON');const [dl,setDl]=useState(false);const [dt,setDt]=useState('');const ini=useRef(false);const flR=useRef(false);
-  useEffect(()=>{if(!visible||ini.current)return;ini.current=true;if(typeof LightweightCharts!=='undefined'){initChart();return;}const s=document.createElement('script');s.src=SERVER+'/static/lwc.js';s.onerror=()=>{s.src='https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js';};s.onload=()=>{if(cR.current)initChart();};document.head.appendChild(s);},[visible]);
-  function initChart(){if(!cR.current||typeof LightweightCharts==='undefined')return;
-    const TZ='Asia/Kolkata';function kF(ts,o){return new Intl.DateTimeFormat('en-GB',Object.assign({timeZone:TZ},o)).format(new Date(ts*1000));}
-    const ch=LightweightCharts.createChart(cR.current,{width:cR.current.clientWidth||900,height:520,layout:{background:{type:'solid',color:'#07091a'},textColor:'#4a5568'},grid:{vertLines:{color:'#0d1526'},horzLines:{color:'#0d1526'}},crosshair:{mode:LightweightCharts.CrosshairMode.Normal,vertLine:{color:'#3b82f6',labelBackgroundColor:'#1e3a8a'},horzLine:{color:'#3b82f6',labelBackgroundColor:'#1e3a8a'}},localization:{timeFormatter:ts=>kF(ts,{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit',hour12:false})+' IST'},rightPriceScale:{borderColor:'#1a2540',scaleMargins:{top:0.08,bottom:0.05}},timeScale:{borderColor:'#1a2540',timeVisible:true,secondsVisible:false,barSpacing:8,tickMarkFormatter:(ts,t)=>{if(t===0)return kF(ts,{year:'numeric'});if(t===1)return kF(ts,{month:'short'});if(t===2)return kF(ts,{day:'2-digit',month:'short'});return kF(ts,{hour:'2-digit',minute:'2-digit',hour12:false});}}});
-    new ResizeObserver(()=>ch.applyOptions({width:cR.current.clientWidth})).observe(cR.current);
-    const cs=ch.addCandlestickSeries({upColor:'#26a69a',downColor:'#ef5350',borderUpColor:'#26a69a',borderDownColor:'#ef5350',wickUpColor:'#26a69a',wickDownColor:'#ef5350'});
-    const ss=ch.addLineSeries({lineWidth:2,priceLineVisible:false,lastValueVisible:false,crosshairMarkerVisible:false});
-    chR.current=ch;csR.current=cs;stR.current=ss;fetch2();setInterval(fetch2,5000);}
-  function fetch2(){fetch(SERVER+'/ohlcv?limit=0').then(r=>r.json()).then(d=>{if(csR.current){csR.current.setData(d.ohlcv);csR.current.setMarkers(d.markers||[]);}if(stR.current)stR.current.setData(d.supertrend);if(chR.current&&!flR.current){flR.current=true;chR.current.timeScale().scrollToRealTime();}const lv=d.live||{};if(lv.active){setDl(true);setDt((lv.symbol||'')+' '+(lv.timeframe||'')+' — '+(lv.market_open?'MARKET OPEN':'market closed'));}else{setDl(false);setDt(lv.error?'MT5: '+lv.error:'historical data');}}).catch(()=>{setDl(false);setDt('server offline');});}
-  function tST(){stV.current=!stV.current;if(stR.current)stR.current.applyOptions({visible:stV.current});setStL(stV.current?'Supertrend ON':'Supertrend OFF');}
-  return html`<div class="candle-wrap"><div class="candle-toolbar"><div class="candle-title">Candlestick — All Bars <span class=${'status-dot'+(dl?' live':'')} title=${dt}></span></div><button class=${'btn-toggle'+(stV.current?' on':'')} onclick=${tST}>${stL}</button></div><div ref=${cR} style=${{width:'100%',height:'520px',overflow:'hidden'}}></div></div>`;}
-function Clock(){const [t,setT]=useState('');useEffect(()=>{const tick=()=>setT(new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',second:'2-digit'}));tick();const id=setInterval(tick,1000);return()=>clearInterval(id);},[]);return html`<span class="tb-time">${t}</span>`;}
-function App(){
-  const [data,setData]=useState(null);const [loading,setLoading]=useState(true);const [err,setErr]=useState(false);
-  const [tab,setTab]=useState(location.hash==='#candles'?'candles':'performance');const [streak,setStreak]=useState(null);
-  useEffect(()=>{fetch(SERVER+'/trades').then(r=>r.json()).then(d=>{setData(d);setLoading(false);}).catch(()=>{setErr(true);setLoading(false);});},[]);
-  useEffect(()=>{let h=null;const id=setInterval(()=>{fetch(SERVER+'/dashboard_hash').then(r=>r.json()).then(d=>{if(h===null){h=d.hash;return;}if(d.hash!==h)location.reload();}).catch(()=>{});},3000);return()=>clearInterval(id);},[]);
-  useEffect(()=>{location.hash=tab;},[tab]);
-  useEffect(()=>{const fn=e=>{if(e.key==='Escape')setStreak(null);};document.addEventListener('keydown',fn);return()=>document.removeEventListener('keydown',fn);},[]);
-  if(loading)return html`<div style=${{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh',flexDirection:'column',gap:'12px'}}><div style=${{width:'28px',height:'28px',border:'2px solid #1c2332',borderTop:'2px solid #d29922',borderRadius:'50%',animation:'spin 1s linear infinite'}}></div><div style=${{fontSize:'11px',color:'#3d4451',letterSpacing:'.12em',textTransform:'uppercase',fontFamily:"'JetBrains Mono',monospace"}}>Loading trade data…</div></div>`;
-  if(err)return html`<div style=${{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh',flexDirection:'column',gap:'16px',padding:'40px'}}><div style=${{fontSize:'28px'}}>⚡</div><div style=${{fontSize:'16px',fontWeight:700,color:'#c9d1d9',fontFamily:"'Inter',sans-serif"}}>Server Offline</div><div style=${{fontSize:'13px',color:'#6e7681',textAlign:'center',lineHeight:'1.6',fontFamily:"'Inter',sans-serif"}}>Start chart server: <code style=${{background:'#161b22',padding:'2px 8px',borderRadius:'4px',color:'#d29922',fontFamily:"'JetBrains Mono',monospace"}}>python chart_server.py</code></div></div>`;
-  const {meta,metrics:m,monthly_rows,weekly_rows,symbols_data,rows,eq_labels,eq_data,profits,win_streak_trades,loss_streak_trades}=data;
-  const pPos=m.total_profit>=0;const wrC=m.win_rate>=50?'#3fb950':'#f85149';const pfC=m.pf_val>=1?'#3fb950':'#f85149';const stH=m.cur_t==='win'?'#22c55e':'#ef4444';
-  const lWR=m.n_long?(m.long_wins/m.n_long*100).toFixed(1):0;const sWR=m.n_short?(m.short_wins/m.n_short*100).toFixed(1):0;
-  return html`<div>
-    <div class="terminal-bar"><span class="tb-brand">ALGO · TERMINAL</span><div class="tb-sep"></div><span class="tb-pill active">${meta.strategies||'Strategy'}</span><span class="tb-pill">${meta.symbols||'Symbols'}</span><span class="tb-pill">${meta.timeframe||'—'}</span><span class="tb-pill">${meta.n} trades</span><span class="tb-pill">${meta.date_from} → ${meta.date_to}</span><div class="tb-right"><${Clock}/><div class="tb-dot" title="System active"></div></div></div>
-    <div class="page-wrap">
-      <div class="tab-nav"><button class=${'tab-btn'+(tab==='performance'?' active':'')} onclick=${()=>setTab('performance')}>Performance</button><button class=${'tab-btn'+(tab==='candles'?' active':'')} onclick=${()=>setTab('candles')}>Candles</button></div>
-      <div style=${{display:tab==='performance'?'block':'none'}}>
-        <${SBlock} title=${'Overall Performance · '+meta.timeframe+' · '+meta.n+' trades · '+meta.date_from+' → '+meta.date_to}>
-          <div class="cards">
-            <${Card} lbl="Total Return" val=${(pPos?'+':'')+fP(m.total_profit)} valStyle=${{color:pPos?'#3fb950':'#f85149'}} sub=${(pPos?'▲ ':'▼ ')+Math.abs(m.profit_pct)+'%'}/>
-            <${Card} lbl="Final Capital" val=${fC(m.end_cap)} valStyle=${{color:'#2f81f7'}} sub=${'Started '+fC(m.start_cap)}/>
-            <${Card} lbl="Peak Capital" val=${fC(m.peak_cap)} valStyle=${{color:'#d29922'}} sub="Max capital ever reached"/>
-            <${Card} lbl="Win Rate" val=${m.win_rate+'%'} valStyle=${{color:wrC}} sub=${m.nw+'W · '+m.nl+'L · '+meta.n+' total'}/>
-            <${Card} lbl="Buy (Long) Trades" val=${m.n_long} valStyle=${{color:'#3fb950'}} sub=${m.long_wins+'W · '+m.long_losses+'L · '+lWR+'% win rate'}/>
-            <${Card} lbl="Sell (Short) Trades" val=${m.n_short} valStyle=${{color:'#f85149'}} sub=${m.short_wins+'W · '+m.short_losses+'L · '+sWR+'% win rate'}/>
-            <${Card} lbl="Profit Factor" val=${m.pf_display} valStyle=${{color:pfC}} sub="Gross win ÷ gross loss"/>
-            <${Card} lbl="Avg Profit / Win" val=${'+$'+m.avg_win.toFixed(2)} valStyle=${{color:'#3fb950'}} sub=${'Over '+m.nw+' winning trades'}/>
-            <${Card} lbl="Avg Loss / Loss" val=${'$'+m.avg_loss.toFixed(2)} valStyle=${{color:'#f85149'}} sub=${'Over '+m.nl+' losing trades'}/>
-            <${Card} lbl="Avg P&L / Trade" val=${(m.avg_all>=0?'+$':'-$')+Math.abs(m.avg_all).toFixed(2)} valStyle=${{color:m.avg_all>=0?'#3fb950':'#f85149'}} sub="Expectancy per trade"/>
-            <${Card} lbl="Biggest Win" val=${'+$'+m.biggest_win.profit.toFixed(2)} valStyle=${{color:'#3fb950'}} sub=${m.biggest_win.time.slice(0,10)+' · '+m.biggest_win.symbol}/>
-            <${Card} lbl="Biggest Loss" val=${'$'+m.biggest_loss.profit.toFixed(2)} valStyle=${{color:'#f85149'}} sub=${m.biggest_loss.time.slice(0,10)+' · '+m.biggest_loss.symbol}/>
-            <${Card} lbl="Max Drawdown" val=${m.max_dd+'%'} valStyle=${{color:'#f85149'}} sub="Peak-to-trough"/>
-            <${Card} lbl="Max Win Streak" val=${m.max_ws} valStyle=${{color:'#3fb950'}} sub="Consecutive wins ↗" className="streak-card" onClick=${()=>setStreak({type:'win',trades:win_streak_trades})}/>
-            <${Card} lbl="Max Loss Streak" val=${m.max_ls} valStyle=${{color:'#f85149'}} sub="Consecutive losses ↘" className="streak-card" onClick=${()=>setStreak({type:'loss',trades:loss_streak_trades})}/>
-            <${Card} lbl="Current Streak" val=${m.cur_s+' '+m.cur_t.toUpperCase()} valStyle=${{color:stH}} sub="Most recent run"/>
-          </div>
-        </${SBlock}>
-        ${symbols_data.length?html`<${SBlock} title="Symbol Breakdown"><div class="sym-cards">${symbols_data.map(s=>html`<${SymCard} key=${s.symbol} s=${s}/>`)} </div></${SBlock}>`:null}
-        <${SBlock} title="Equity & P&L Charts"><div class="charts"><div class="chart-box"><${EqChart} labels=${eq_labels} data=${eq_data}/></div><div class="chart-box"><div class="chart-lbl">Trade P&L</div><${PlChart} profits=${profits}/></div></div></${SBlock}>
-        <${SBlock} title="Monthly Performance"><div class="tbl-box" style=${{marginBottom:0}}><div class="month-calendar">${monthly_rows.map(r=>html`<${CalCell} key=${r.month} row=${r} field="month"/>`)}</div></div></${SBlock}>
-        <${SBlock} title="Weekly Performance"><div class="tbl-box" style=${{marginBottom:0}}><div class="month-calendar">${weekly_rows.map(r=>html`<${CalCell} key=${r.week} row=${r} field="week"/>`)}</div></div></${SBlock}>
-        ${symbols_data.length?html`<${SBlock} title="Symbol Performance Summary"><div class="sym-table-wrap" style=${{marginBottom:0}}><table class="sym-tbl"><thead><tr><th>Symbol</th><th>Trades</th><th>Wins</th><th>Losses</th><th>Win Rate</th><th>P&L</th><th>Return %</th></tr></thead><tbody>${symbols_data.map(s=>{const p=s.profit>=0;const wc=s.win_rate>=50?'#22c55e':'#ef4444';const c=sClr(s.symbol);return html`<tr key=${s.symbol}><td><span class="sym-badge" style=${{color:c,borderColor:c+'55',background:c+'18'}}>${s.symbol}</span></td><td style=${{color:'#60a5fa'}}>${s.trades}</td><td style=${{color:'#22c55e'}}>${s.wins}</td><td style=${{color:'#ef4444'}}>${s.losses}</td><td style=${{color:wc}}>${s.win_rate}%</td><td style=${{color:p?'#22c55e':'#ef4444'}}>${fP(s.profit)}</td><td style=${{color:p?'#22c55e':'#ef4444'}}>${(p?'▲ ':'▼ ')+Math.abs(s.profit_pct).toFixed(2)+'%'}</td></tr>`; })}</tbody><tfoot><tr><td style=${{color:'#94a3b8'}}>TOTAL</td><td style=${{color:'#60a5fa'}}>${symbols_data.reduce((a,s)=>a+s.trades,0)}</td><td style=${{color:'#22c55e'}}>${symbols_data.reduce((a,s)=>a+s.wins,0)}</td><td style=${{color:'#ef4444'}}>${symbols_data.reduce((a,s)=>a+s.losses,0)}</td><td style=${{color:wrC}}>${m.win_rate}%</td><td style=${{color:pPos?'#22c55e':'#ef4444'}}>${fP(m.total_profit)}</td><td style=${{color:'#475569'}}>—</td></tr></tfoot></table></div></${SBlock}>`:null}
-        <${SBlock} title="Trade Log"><div class="tbl-box" style=${{marginBottom:0}}><${TradeLog} rows=${rows}/></div></${SBlock}>
-      </div>
-      <div style=${{display:tab==='candles'?'block':'none'}}><${CandlesPane} visible=${tab==='candles'}/></div>
+
+<div class="page-wrap">
+
+<!-- ── Tab navigation ── -->
+<div class="tab-nav">
+  <button class="tab-btn active" onclick="switchTab('performance', this)">Performance</button>
+  <button class="tab-btn"        onclick="switchTab('candles',     this)">Candles</button>
+</div>
+
+<!-- ══════════════════ PERFORMANCE PANE ══════════════════ -->
+<div id="pane-performance" class="tab-pane active">
+
+<!-- Section label -->
+<div class="section-hdr">
+  <span class="section-lbl">Overall Performance</span>
+  <span class="section-sub">All symbols combined &nbsp;·&nbsp; {m['n']} closed trades &nbsp;·&nbsp; {date_from[:10]} → {date_to[:10]}</span>
+</div>
+
+<!-- Metric Cards -->
+<div class="cards">
+
+  <div class="card">
+    <div class="card-lbl">Total Return</div>
+    <div class="card-val {profit_color}">{profit_sign}{profit_abs}</div>
+    <div class="card-sub">{pct_arrow} {pct_abs}%</div>
+  </div>
+
+  <div class="card">
+    <div class="card-lbl">Final Capital</div>
+    <div class="card-val clr-blue">{end_cap_str}</div>
+    <div class="card-sub">Started {start_cap_str}</div>
+  </div>
+
+  <div class="card">
+    <div class="card-lbl">Win Rate</div>
+    <div class="card-val {wr_color}">{m['win_rate']}%</div>
+    <div class="card-sub">{m['nw']}W &nbsp;·&nbsp; {m['nl']}L &nbsp;·&nbsp; {m['n']} total</div>
+  </div>
+
+  <div class="card">
+    <div class="card-lbl">Profit Factor</div>
+    <div class="card-val {pf_color}">{m['pf_display']}</div>
+    <div class="card-sub">gross win ÷ gross loss</div>
+  </div>
+
+  <div class="card">
+    <div class="card-lbl">Avg Profit / Win</div>
+    <div class="card-val clr-green">{avg_w_str}</div>
+    <div class="card-sub">over {m['nw']} winning trades</div>
+  </div>
+
+  <div class="card">
+    <div class="card-lbl">Avg Loss / Loss</div>
+    <div class="card-val clr-red">{avg_l_str}</div>
+    <div class="card-sub">over {m['nl']} losing trades</div>
+  </div>
+
+  <div class="card">
+    <div class="card-lbl">Avg P&amp;L / Trade</div>
+    <div class="card-val {avg_all_color}">{avg_all_str}</div>
+    <div class="card-sub">expectancy per trade</div>
+  </div>
+
+  <div class="card">
+    <div class="card-lbl">Biggest Win</div>
+    <div class="card-val clr-green">+${m['biggest_win']['profit']:.2f}</div>
+    <div class="card-sub bw-meta">{m['biggest_win']['time'][:10]} &nbsp;·&nbsp; {m['biggest_win']['symbol']} &nbsp;·&nbsp; {m['biggest_win']['strategy']}</div>
+  </div>
+
+  <div class="card">
+    <div class="card-lbl">Biggest Loss</div>
+    <div class="card-val clr-red">${m['biggest_loss']['profit']:.2f}</div>
+    <div class="card-sub bw-meta">{m['biggest_loss']['time'][:10]} &nbsp;·&nbsp; {m['biggest_loss']['symbol']} &nbsp;·&nbsp; {m['biggest_loss']['strategy']}</div>
+  </div>
+
+  <div class="card">
+    <div class="card-lbl">Max Drawdown</div>
+    <div class="card-val clr-red">{m['max_dd']}%</div>
+    <div class="card-sub">Peak-to-trough</div>
+  </div>
+
+  <div class="card streak-card" onclick="openStreakModal('win')" title="Click to view trades">
+    <div class="card-lbl">Max Win Streak</div>
+    <div class="card-val clr-green">{m['max_ws']}</div>
+    <div class="card-sub">consecutive wins &nbsp;↗</div>
+  </div>
+
+  <div class="card streak-card" onclick="openStreakModal('loss')" title="Click to view trades">
+    <div class="card-lbl">Max Loss Streak</div>
+    <div class="card-val clr-red">{m['max_ls']}</div>
+    <div class="card-sub">consecutive losses &nbsp;↗</div>
+  </div>
+
+  <div class="card">
+    <div class="card-lbl">Current Streak</div>
+    <div class="card-val" style="color:{streak_hex}">{streak_label}</div>
+    <div class="card-sub">most recent run</div>
+  </div>
+
+</div>
+
+<!-- Symbol breakdown (rendered by JS) -->
+<div id="sym-section" style="display:none">
+  <div class="sym-section-hdr">
+    <div class="sym-section-lbl">Symbol Breakdown</div>
+  </div>
+  <div id="sym-cards" class="sym-cards"></div>
+</div>
+
+<!-- Charts -->
+<div class="charts">
+  <div class="chart-box">
+    <div class="chart-lbl">Equity Curve</div>
+    <canvas id="eqChart" height="110"></canvas>
+  </div>
+  <div class="chart-box">
+    <div class="chart-lbl">Trade P&amp;L</div>
+    <canvas id="plChart" height="110"></canvas>
+  </div>
+</div>
+
+<!-- Monthly Calendar -->
+<div class="tbl-box">
+  <div class="tbl-lbl">Monthly Performance Calendar</div>
+  <div id="month-calendar" class="month-calendar"></div>
+</div>
+
+<!-- Trade Log -->
+<div class="tbl-box">
+  <div class="tbl-hdr">
+    <div class="tbl-lbl" style="margin-bottom:0">Trade Log</div>
+    <div class="filter-bar">
+      <select id="stratFilter" class="month-select">
+        <option value="all">All Strategies</option>
+      </select>
+      <select id="symFilter" class="month-select">
+        <option value="all">All Symbols</option>
+      </select>
+      <select id="monthFilter" class="month-select">
+        <option value="all">All Months</option>
+      </select>
     </div>
-    ${streak?html`<${StreakModal} type=${streak.type} trades=${streak.trades} onClose=${()=>setStreak(null)}/>`:null}
-  </div>`;
-}
-render(html`<${App}/>`,document.getElementById('root'));
-}
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Exit Time</th>
+        <th>Symbol</th>
+        <th>Strategy</th>
+        <th>Dir</th>
+        <th>Entry</th>
+        <th>Stop Loss</th>
+        <th>Target</th>
+        <th>Exit</th>
+        <th>Closed By</th>
+        <th>P &amp; L</th>
+        <th>Capital</th>
+      </tr>
+    </thead>
+    <tbody id="tbody"></tbody>
+  </table>
+</div>
+
+<!-- Symbol summary table (built by JS) -->
+<div class="sym-table-wrap" id="symTableWrap" style="display:none">
+  <div class="sym-table-lbl">Symbol Performance Summary</div>
+  <table class="sym-tbl">
+    <thead>
+      <tr>
+        <th>Symbol</th>
+        <th>Trades</th>
+        <th>Wins</th>
+        <th>Losses</th>
+        <th>Win Rate</th>
+        <th>P &amp; L</th>
+        <th>Return %</th>
+      </tr>
+    </thead>
+    <tbody id="symTbody"></tbody>
+    <tfoot id="symTfoot"></tfoot>
+  </table>
+</div>
+
+</div><!-- /pane-performance -->
+
+<!-- ══════════════════ STREAK MODAL ══════════════════ -->
+<div class="modal-overlay" id="streakModal" onclick="closeStreakModal(event)">
+  <div class="modal-box">
+    <button class="modal-close" onclick="closeStreakModal(null)">✕</button>
+    <div class="modal-title" id="modalTitle"></div>
+    <div class="modal-sub"  id="modalSub"></div>
+    <table class="modal-tbl">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Exit Time</th>
+          <th>Symbol</th>
+          <th>Dir</th>
+          <th>Entry</th>
+          <th>Exit</th>
+          <th>P &amp; L</th>
+          <th>Capital</th>
+        </tr>
+      </thead>
+      <tbody id="modalTbody"></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ══════════════════ CANDLES PANE ══════════════════ -->
+<div id="pane-candles" class="tab-pane">
+  <div class="candle-wrap">
+    <div class="candle-toolbar">
+      <div class="candle-title">
+        {m['symbols_str'] or 'XAUUSD'} &nbsp;·&nbsp; Candlestick
+        <span class="status-dot" id="liveDot" title="Green = live server connected"></span>
+      </div>
+      <button class="btn-toggle on" id="stToggle" onclick="toggleSupertrend()">Supertrend ON</button>
+    </div>
+    <div id="candleChart"></div>
+  </div>
+</div>
+
+</div><!-- /page-wrap -->
+
+<script>
+var rows        = {rows_j};
+var monthlyRows = {monthly_rows_j};
+var eqLabels    = {eq_labels_j};
+var eqData      = {eq_data_j};
+var plData      = {profits_j};
+var barClrs     = {bar_clrs_j};
+var ohlcvData   = {ohlcv_json};
+var stData      = {st_json};
+var markersData = {markers_json};
+var symbolsData      = {symbols_data_j};
+var winStreakTrades  = {win_streak_trades_j};
+var lossStreakTrades = {loss_streak_trades_j};
+
+// ── Tab switching ──────────────────────────────────────────────
+function switchTab(name, btn) {{
+  document.querySelectorAll('.tab-pane').forEach(function(p) {{
+    p.classList.remove('active');
+  }});
+  document.querySelectorAll('.tab-btn').forEach(function(b) {{
+    b.classList.remove('active');
+  }});
+  document.getElementById('pane-' + name).classList.add('active');
+  btn.classList.add('active');
+  location.hash = name;
+  if (name === 'candles' && !candleChart) {{
+    requestAnimationFrame(function() {{ initCandleChart(); }});
+  }}
+}}
+
+// Restore tab from URL hash on page load
+(function() {{
+  if (location.hash === '#candles') {{
+    var btns = document.querySelectorAll('.tab-btn');
+    btns.forEach(function(b) {{ b.classList.remove('active'); }});
+    btns[1].classList.add('active');
+    document.querySelectorAll('.tab-pane').forEach(function(p) {{ p.classList.remove('active'); }});
+    document.getElementById('pane-candles').classList.add('active');
+    window.addEventListener('load', function() {{ initCandleChart(); }});
+  }}
+}})();
+
+// ── Monthly Calendar ──────────────────────────
+(function() {{
+  var cal  = document.getElementById('month-calendar');
+  var html = '';
+  monthlyRows.forEach(function(r) {{
+    var pos    = r.profit >= 0;
+    var pnlStr = (pos ? '+$' : '-$') + Math.abs(r.profit).toFixed(2);
+    var pctStr = (pos ? '&#9650; ' : '&#9660; ') + Math.abs(r.profit_pct).toFixed(2) + '%';
+    var pctClr = pos ? '#3fb950' : '#f85149';
+    var wrClr  = r.win_rate >= 50 ? '#3fb950' : '#f85149';
+    html +=
+      '<div class="month-cell ' + (pos ? 'mc-profit' : 'mc-loss') + '">' +
+        '<div class="mc-name">' + r.month + '</div>' +
+        '<div class="mc-pnl ' + (pos ? 'mc-pos' : 'mc-neg') + '">' + pnlStr + '</div>' +
+        '<div style="font-size:11px;font-family:monospace;color:' + pctClr + ';margin-bottom:6px;font-weight:700">' + pctStr + '</div>' +
+        '<hr class="mc-divider">' +
+        '<div class="mc-row"><span class="mc-lbl">Trades</span>  <span class="mc-val c-trades">' + r.trades   + '</span></div>' +
+        '<div class="mc-row"><span class="mc-lbl">Wins</span>    <span class="mc-val c-wins">'   + r.wins     + '</span></div>' +
+        '<div class="mc-row"><span class="mc-lbl">Losses</span>  <span class="mc-val c-losses">' + r.losses   + '</span></div>' +
+        '<div class="mc-row"><span class="mc-lbl">Win Rate</span><span class="mc-val" style="color:' + wrClr + '">' + r.win_rate + '%</span></div>' +
+      '</div>';
+  }});
+  cal.innerHTML = html;
+}})();
+
+// ── Symbol color palette (defined first — used by all blocks below) ──
+var SYM_PALETTE = {{
+  'XAUUSD': {{ color:'#f59e0b', bg:'rgba(245,158,11,.10)', border:'rgba(245,158,11,.30)' }},
+  'EURUSD': {{ color:'#3b82f6', bg:'rgba(59,130,246,.10)',  border:'rgba(59,130,246,.30)'  }},
+  'GBPUSD': {{ color:'#8b5cf6', bg:'rgba(139,92,246,.10)',  border:'rgba(139,92,246,.30)'  }},
+  'USDJPY': {{ color:'#22c55e', bg:'rgba(34,197,94,.10)',   border:'rgba(34,197,94,.30)'   }},
+  'USDCHF': {{ color:'#06b6d4', bg:'rgba(6,182,212,.10)',   border:'rgba(6,182,212,.30)'   }},
+  'BTCUSD': {{ color:'#f97316', bg:'rgba(249,115,22,.10)',  border:'rgba(249,115,22,.30)'  }},
+}};
+var FALLBACK_COLORS = ['#a78bfa','#34d399','#fb7185','#38bdf8','#facc15','#e879f9'];
+var _symColorCache = {{}};
+var _symColorIdx = 0;
+function symColor(sym) {{
+  if (_symColorCache[sym]) return _symColorCache[sym];
+  if (SYM_PALETTE[sym]) {{ _symColorCache[sym] = SYM_PALETTE[sym]; return _symColorCache[sym]; }}
+  var c = FALLBACK_COLORS[_symColorIdx % FALLBACK_COLORS.length]; _symColorIdx++;
+  _symColorCache[sym] = {{ color: c, bg: 'rgba(0,0,0,.1)', border: 'rgba(128,128,128,.3)' }};
+  return _symColorCache[sym];
+}}
+
+// ── Symbol summary table ──────────────────────────────────────
+(function() {{
+  if (!symbolsData.length) return;
+  document.getElementById('symTableWrap').style.display = 'block';
+  var tbody = document.getElementById('symTbody');
+  var tfoot = document.getElementById('symTfoot');
+
+  var totTrades = 0, totWins = 0, totLosses = 0, totPnl = 0;
+
+  var html = '';
+  symbolsData.forEach(function(s) {{
+    var pos    = s.profit >= 0;
+    var pnlStr = (pos ? '+$' : '-$') + Math.abs(s.profit).toFixed(2);
+    var pctStr = (pos ? '▲ ' : '▼ ') + Math.abs(s.profit_pct).toFixed(2) + '%';
+    var wrClr  = s.win_rate >= 50 ? '#22c55e' : '#ef4444';
+    var pnlClr = pos ? '#22c55e' : '#ef4444';
+    var sc     = symColor(s.symbol);
+    html +=
+      '<tr>' +
+        '<td><span class="sym-badge" style="color:' + sc.color + ';border-color:' + sc.border + ';background:' + sc.bg + '">' + s.symbol + '</span></td>' +
+        '<td style="color:#60a5fa">' + s.trades + '</td>' +
+        '<td style="color:#22c55e">' + s.wins   + '</td>' +
+        '<td style="color:#ef4444">' + s.losses + '</td>' +
+        '<td style="color:' + wrClr  + '">' + s.win_rate + '%</td>' +
+        '<td style="color:' + pnlClr + '">' + pnlStr + '</td>' +
+        '<td style="color:' + pnlClr + '">' + pctStr + '</td>' +
+      '</tr>';
+    totTrades += s.trades; totWins += s.wins; totLosses += s.losses; totPnl += s.profit;
+  }});
+  tbody.innerHTML = html;
+
+  var totPos    = totPnl >= 0;
+  var totPnlStr = (totPos ? '+$' : '-$') + Math.abs(totPnl).toFixed(2);
+  var totWrStr  = totTrades ? (totWins / totTrades * 100).toFixed(1) + '%' : '—';
+  var totClr    = totPos ? '#22c55e' : '#ef4444';
+  tfoot.innerHTML =
+    '<tr>' +
+      '<td style="color:#94a3b8">TOTAL</td>' +
+      '<td style="color:#60a5fa">' + totTrades + '</td>' +
+      '<td style="color:#22c55e">' + totWins   + '</td>' +
+      '<td style="color:#ef4444">' + totLosses + '</td>' +
+      '<td style="color:' + (parseFloat(totWrStr) >= 50 ? '#22c55e' : '#ef4444') + '">' + totWrStr + '</td>' +
+      '<td style="color:' + totClr + '">' + totPnlStr + '</td>' +
+      '<td style="color:#475569">—</td>' +
+    '</tr>';
+}})();
+
+// ── Streak modal ──────────────────────────────────────────────
+function openStreakModal(type) {{
+  var trades = type === 'win' ? winStreakTrades : lossStreakTrades;
+  var title  = type === 'win' ? 'Max Win Streak' : 'Max Loss Streak';
+  var clr    = type === 'win' ? '#22c55e' : '#ef4444';
+
+  document.getElementById('modalTitle').textContent = title;
+  document.getElementById('modalTitle').style.color = clr;
+  document.getElementById('modalSub').textContent   = trades.length + ' consecutive ' + (type === 'win' ? 'winning' : 'losing') + ' trades';
+
+  var html = '';
+  trades.forEach(function(t, i) {{
+    var win    = t.profit > 0;
+    var pnlStr = (win ? '+$' : '-$') + Math.abs(t.profit).toFixed(2);
+    var capStr = '$' + t.cap.toLocaleString();
+    var sc     = symColor(t.symbol);
+    var symBdg = t.symbol ? '<span class="sym-badge" style="color:' + sc.color + ';border-color:' + sc.border + ';background:' + sc.bg + '">' + t.symbol + '</span>' : '—';
+    var dirBdg = t.dir === 'LONG'
+      ? '<span class="badge b-long">LONG</span>'
+      : '<span class="badge b-short">SHORT</span>';
+    html +=
+      '<tr>' +
+        '<td class="muted">' + (i + 1) + '</td>' +
+        '<td class="muted">' + t.time  + '</td>' +
+        '<td>' + symBdg + '</td>' +
+        '<td>' + dirBdg + '</td>' +
+        '<td class="hl">' + t.entry + '</td>' +
+        '<td class="hl">' + t.exit  + '</td>' +
+        '<td class="' + (win ? 'win-txt' : 'los-txt') + '">' + pnlStr + '</td>' +
+        '<td style="color:#60a5fa">' + capStr + '</td>' +
+      '</tr>';
+  }});
+  document.getElementById('modalTbody').innerHTML = html || '<tr><td colspan="8" style="text-align:center;color:#334155;padding:20px">No trades</td></tr>';
+  document.getElementById('streakModal').classList.add('open');
+}}
+
+function closeStreakModal(e) {{
+  if (e && e.target !== document.getElementById('streakModal')) return;
+  document.getElementById('streakModal').classList.remove('open');
+}}
+
+document.addEventListener('keydown', function(e) {{
+  if (e.key === 'Escape') document.getElementById('streakModal').classList.remove('open');
+}});
+
+// ── Symbol summary cards ───────────────────────────────────────
+(function() {{
+  if (!symbolsData.length) return;
+  document.getElementById('sym-section').style.display = 'block';
+  var container = document.getElementById('sym-cards');
+  var html = '';
+  symbolsData.forEach(function(s) {{
+    var sc     = symColor(s.symbol);
+    var pos    = s.profit >= 0;
+    var pnlStr = (pos ? '+$' : '-$') + Math.abs(s.profit).toFixed(2);
+    var pctStr = (pos ? '▲' : '▼') + ' ' + Math.abs(s.profit_pct).toFixed(2) + '%';
+    var pnlClr = pos ? '#22c55e' : '#ef4444';
+    var wrClr  = s.win_rate >= 50 ? '#22c55e' : '#ef4444';
+    html +=
+      '<div class="sym-card" style="border-left-color:' + sc.color + ';--sc:' + sc.color + '">' +
+        '<div class="sym-name">' + s.symbol + '</div>' +
+        '<div class="sym-pnl" style="color:' + pnlClr + '">' + pnlStr + '</div>' +
+        '<div class="sym-pct">' + pctStr + '</div>' +
+        '<div class="sym-stats">' +
+          '<div class="sym-stat-item">' +
+            '<div class="sym-stat-val" style="color:#60a5fa">' + s.trades + '</div>' +
+            '<div class="sym-stat-lbl">Trades</div>' +
+          '</div>' +
+          '<div class="sym-stat-item">' +
+            '<div class="sym-stat-val" style="color:' + wrClr + '">' + s.win_rate + '%</div>' +
+            '<div class="sym-stat-lbl">Win Rate</div>' +
+          '</div>' +
+          '<div class="sym-stat-item">' +
+            '<div class="sym-stat-val"><span style="color:#22c55e">' + s.wins + '</span><span style="color:#475569"> / </span><span style="color:#ef4444">' + s.losses + '</span></div>' +
+            '<div class="sym-stat-lbl">W / L</div>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+  }});
+  container.innerHTML = html;
+}})();
+
+// ── Trade Table with month + symbol filter ─────────────────────
+(function() {{
+  var tbody    = document.getElementById('tbody');
+  var monthSel = document.getElementById('monthFilter');
+  var symSel   = document.getElementById('symFilter');
+  var stratSel = document.getElementById('stratFilter');
+
+  // Build month index
+  var monthMap   = {{}};
+  var monthOrder = [];
+  rows.forEach(function(r) {{
+    var m = r.time.substring(0, 7);
+    if (!monthMap[m]) {{
+      var d   = new Date(r.time);
+      var lbl = d.toLocaleString('en-GB', {{month:'short', year:'numeric'}});
+      monthMap[m] = {{label: lbl, rows: []}};
+      monthOrder.push(m);
+    }}
+    monthMap[m].rows.push(r);
+  }});
+
+  // Populate month dropdown
+  monthOrder.forEach(function(m) {{
+    var opt = document.createElement('option');
+    opt.value = m; opt.textContent = monthMap[m].label;
+    monthSel.appendChild(opt);
+  }});
+
+  // Populate symbol dropdown
+  var symSet = [];
+  rows.forEach(function(r) {{
+    if (r.symbol && symSet.indexOf(r.symbol) === -1) symSet.push(r.symbol);
+  }});
+  symSet.sort().forEach(function(s) {{
+    var opt = document.createElement('option');
+    opt.value = s; opt.textContent = s;
+    symSel.appendChild(opt);
+  }});
+
+  // Populate strategy dropdown
+  var stratSet = [];
+  rows.forEach(function(r) {{
+    if (r.strategy && stratSet.indexOf(r.strategy) === -1) stratSet.push(r.strategy);
+  }});
+  stratSet.sort().forEach(function(s) {{
+    var opt = document.createElement('option');
+    opt.value = s; opt.textContent = s;
+    stratSel.appendChild(opt);
+  }});
+
+  function symBadge(sym) {{
+    if (!sym) return '<span style="color:#475569">—</span>';
+    var sc = symColor(sym);
+    return '<span class="sym-badge" style="color:' + sc.color + ';border-color:' + sc.border + ';background:' + sc.bg + '">' + sym + '</span>';
+  }}
+
+  function rowHtml(r) {{
+    var win        = r.profit > 0;
+    var dirBadge   = r.dir === 'LONG'
+      ? '<span class="badge b-long">LONG</span>'
+      : '<span class="badge b-short">SHORT</span>';
+    var lbl = r.label;
+    var closedBadge;
+    if      (lbl === 'ST')  closedBadge = '<span class="badge b-st">Supertrend</span>';
+    else if (lbl === 'R:R') closedBadge = '<span class="badge b-rr">R:R</span>';
+    else if (lbl === 'TP')  closedBadge = '<span class="badge b-tp">TP</span>';
+    else if (lbl === 'REV') closedBadge = '<span class="badge b-rev">Rev Engulf</span>';
+    else                    closedBadge = '<span class="badge b-sl">SL</span>';
+    var pnlStr = (r.profit >= 0 ? '+$' : '-$') + Math.abs(r.profit).toFixed(2);
+    var capStr = '$' + r.cap.toLocaleString();
+    return '<tr>' +
+      '<td class="muted">'   + r.num    + '</td>' +
+      '<td class="muted">'   + r.time   + '</td>' +
+      '<td>'                 + symBadge(r.symbol) + '</td>' +
+      '<td class="muted" style="font-size:11px">' + (r.strategy || '—') + '</td>' +
+      '<td>'                 + dirBadge + '</td>' +
+      '<td class="hl">'      + r.entry  + '</td>' +
+      '<td class="clr-red">' + r.sl     + '</td>' +
+      '<td style="color:#a78bfa">' + r.target + '</td>' +
+      '<td class="hl">'      + r.exit   + '</td>' +
+      '<td>'                 + closedBadge + '</td>' +
+      '<td class="' + (win ? 'win-txt' : 'los-txt') + '">' + pnlStr + '</td>' +
+      '<td style="color:#60a5fa">' + capStr + '</td>' +
+      '</tr>';
+  }}
+
+  function render() {{
+    var month = monthSel.value;
+    var sym   = symSel.value;
+    var strat = stratSel.value;
+    var list  = month === 'all' ? rows : (monthMap[month] ? monthMap[month].rows : []);
+    if (sym   !== 'all') list = list.filter(function(r) {{ return r.symbol   === sym;   }});
+    if (strat !== 'all') list = list.filter(function(r) {{ return r.strategy === strat; }});
+    tbody.innerHTML = list.map(rowHtml).join('');
+  }}
+
+  monthSel.addEventListener('change',  render);
+  symSel.addEventListener('change',    render);
+  stratSel.addEventListener('change',  render);
+  render();
+}})();
+
+// ── Equity Curve ──────────────────────────────
+if (typeof Chart !== 'undefined') {{
+  new Chart(document.getElementById('eqChart'), {{
+    type: 'line',
+    data: {{
+      labels: eqLabels,
+      datasets: [{{
+        data: eqData,
+        borderColor: '#3b82f6',
+        backgroundColor: 'rgba(59,130,246,0.06)',
+        borderWidth: 2,
+        pointRadius: 0,
+        fill: true,
+        tension: 0.35
+      }}]
+    }},
+    options: {{
+      animation: false,
+      plugins: {{ legend: {{ display: false }} }},
+      scales: {{
+        x: {{ display: false }},
+        y: {{
+          grid: {{ color: '#1a2540' }},
+          ticks: {{
+            color: '#334155',
+            callback: function(v) {{ return '$' + v.toLocaleString(); }}
+          }}
+        }}
+      }}
+    }}
+  }});
+
+  // ── P&L Bars ─────────────────────────────────
+  new Chart(document.getElementById('plChart'), {{
+    type: 'bar',
+    data: {{
+      labels: plData.map(function(_, i) {{ return '#' + (i + 1); }}),
+      datasets: [{{
+        data: plData,
+        backgroundColor: barClrs,
+        borderRadius: 2
+      }}]
+    }},
+    options: {{
+      animation: false,
+      plugins: {{ legend: {{ display: false }} }},
+      scales: {{
+        x: {{ display: false }},
+        y: {{
+          grid: {{ color: '#1a2540' }},
+          ticks: {{
+            color: '#334155',
+            callback: function(v) {{ return '$' + v; }}
+          }}
+        }}
+      }}
+    }}
+  }});
+}} // end Chart guard
+
+// ── Candlestick chart ─────────────────────────────────────────
+var candleChart  = null;
+var candleSeries = null;
+var stSeries     = null;
+var stVisible    = true;
+var SERVER_URL   = 'http://localhost:8765';
+
+function initCandleChart() {{
+  if (candleChart) return;
+  if (typeof LightweightCharts === 'undefined') {{
+    document.getElementById('candleChart').innerHTML =
+      '<div style="color:#3d4451;text-align:center;padding:40px;font-size:12px">LightweightCharts library not loaded</div>';
+    return;
+  }}
+  var container = document.getElementById('candleChart');
+
+  var TZ = 'Asia/Kolkata';
+  function kolFmt(ts, opts) {{
+    return new Intl.DateTimeFormat('en-GB', Object.assign({{ timeZone: TZ }}, opts)).format(new Date(ts * 1000));
+  }}
+
+  candleChart = LightweightCharts.createChart(container, {{
+    width:  container.clientWidth || 900,
+    height: 520,
+    layout: {{
+      background: {{ type: 'solid', color: '#07091a' }},
+      textColor:  '#4a5568',
+    }},
+    grid: {{
+      vertLines: {{ color: '#0d1526' }},
+      horzLines: {{ color: '#0d1526' }},
+    }},
+    crosshair: {{
+      mode: LightweightCharts.CrosshairMode.Normal,
+      vertLine: {{ color: '#3b82f6', labelBackgroundColor: '#1e3a8a' }},
+      horzLine: {{ color: '#3b82f6', labelBackgroundColor: '#1e3a8a' }},
+    }},
+    localization: {{
+      timeFormatter: function(ts) {{
+        return kolFmt(ts, {{ day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit', hour12:false }}) + ' IST';
+      }},
+    }},
+    rightPriceScale: {{
+      borderColor: '#1a2540',
+      scaleMargins: {{ top: 0.08, bottom: 0.05 }},
+    }},
+    timeScale: {{
+      borderColor:    '#1a2540',
+      timeVisible:    true,
+      secondsVisible: false,
+      barSpacing:     8,
+      tickMarkFormatter: function(ts, type) {{
+        if (type === 0) return kolFmt(ts, {{ year:'numeric' }});
+        if (type === 1) return kolFmt(ts, {{ month:'short' }});
+        if (type === 2) return kolFmt(ts, {{ day:'2-digit', month:'short' }});
+        return kolFmt(ts, {{ hour:'2-digit', minute:'2-digit', hour12:false }});
+      }},
+    }},
+  }});
+
+  new ResizeObserver(function() {{
+    if (candleChart) {{
+      candleChart.applyOptions({{ width: container.clientWidth }});
+    }}
+  }}).observe(container);
+
+  candleSeries = candleChart.addCandlestickSeries({{
+    upColor:         '#26a69a',
+    downColor:       '#ef5350',
+    borderUpColor:   '#26a69a',
+    borderDownColor: '#ef5350',
+    wickUpColor:     '#26a69a',
+    wickDownColor:   '#ef5350',
+  }});
+
+  stSeries = candleChart.addLineSeries({{
+    lineWidth:              2,
+    priceLineVisible:       false,
+    lastValueVisible:       false,
+    crosshairMarkerVisible: false,
+  }});
+
+  if (ohlcvData.length) {{
+    candleSeries.setData(ohlcvData);
+    candleSeries.setMarkers(markersData);
+    stSeries.setData(stData);
+    candleChart.timeScale().fitContent();
+  }}
+
+  fetchAndUpdate();
+  setInterval(fetchAndUpdate, 5000);
+}}
+
+function fetchAndUpdate() {{
+  if (!candleChart) return;
+  fetch(SERVER_URL + '/ohlcv?limit=0')
+    .then(function(res) {{ return res.json(); }})
+    .then(function(data) {{
+      candleSeries.setData(data.ohlcv);
+      candleSeries.setMarkers(data.markers || markersData);
+      stSeries.setData(data.supertrend);
+      var dot = document.getElementById('liveDot');
+      var lv  = data.live || {{}};
+      if (lv.active) {{
+        dot.classList.add('live');
+        var mkt = lv.market_open ? 'MARKET OPEN' : 'market closed';
+        dot.title = (lv.symbol || '') + ' ' + (lv.timeframe || '') +
+                    ' — ' + mkt + ' — updated ' + (lv.last_update || '');
+      }} else {{
+        dot.classList.remove('live');
+        dot.title = lv.error ? 'MT5: ' + lv.error : 'historical data (server connected)';
+      }}
+    }})
+    .catch(function() {{
+      var dot = document.getElementById('liveDot');
+      dot.classList.remove('live');
+      dot.title = 'server offline — showing embedded snapshot';
+    }});
+}}
+
+function toggleSupertrend() {{
+  stVisible = !stVisible;
+  if (stSeries) {{
+    stSeries.applyOptions({{ visible: stVisible }});
+  }}
+  var btn = document.getElementById('stToggle');
+  btn.textContent = stVisible ? 'Supertrend ON' : 'Supertrend OFF';
+  btn.classList.toggle('on', stVisible);
+}}
+
+// ── Terminal bar clock ────────────────────────────────────────────
+(function updateClock() {{
+  var el = document.getElementById('tbTime');
+  if (el) {{
+    var now = new Date();
+    el.textContent = now.toLocaleTimeString('en-GB', {{hour:'2-digit', minute:'2-digit', second:'2-digit'}});
+  }}
+  setTimeout(updateClock, 1000);
+}})();
+
+// ── Auto-refresh: reload when dashboard.html is rebuilt ───────────
+(function() {{
+  var lastHash = null;
+  function checkHash() {{
+    fetch('http://localhost:8765/dashboard_hash')
+      .then(function(r) {{ return r.json(); }})
+      .then(function(d) {{
+        if (lastHash === null) {{ lastHash = d.hash; return; }}
+        if (d.hash !== lastHash) {{ location.reload(); }}
+      }})
+      .catch(function() {{}});
+  }}
+  setInterval(checkHash, 3000);
+  checkHash();
+}})();
 </script>
 </body>
 </html>"""
-
 
 
 if __name__ == "__main__":

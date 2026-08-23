@@ -1,0 +1,9 @@
+{
+  "RR": 3,
+  "TP_MODE": "st",
+  "RISK_PER_TRADE": 0.02,
+  "EMA20_SUPERTREND_FILTER": true,
+  "RISK_MODE": "percent",
+  "RISK_AMOUNT": 25,
+  "INITIAL_CAPITAL": 400
+}
